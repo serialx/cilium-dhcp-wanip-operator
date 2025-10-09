@@ -69,6 +69,8 @@ type PublicIPClaimReconciler struct {
 func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
+	log.V(1).Info("reconciling PublicIPClaim")
+
 	var claim networkv1alpha1.PublicIPClaim
 	if err := r.Get(ctx, req.NamespacedName, &claim); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -76,51 +78,64 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Handle deletion
 	if !claim.DeletionTimestamp.IsZero() {
+		log.Info("deleting PublicIPClaim", "wanInterface", claim.Status.WanInterface)
 		if controllerutil.ContainsFinalizer(&claim, finalizerName) {
 			// Cleanup router interface
+			log.Info("cleaning up router interface", "wanInterface", claim.Status.WanInterface, "router", claim.Spec.Router.Host)
 			if err := r.cleanupRouterInterface(ctx, &claim); err != nil {
-				log.Error(err, "failed to cleanup router interface")
+				log.Error(err, "failed to cleanup router interface", "wanInterface", claim.Status.WanInterface)
 				return ctrl.Result{}, err
 			}
+			log.Info("router interface cleaned up successfully", "wanInterface", claim.Status.WanInterface)
 
 			// Remove finalizer
 			controllerutil.RemoveFinalizer(&claim, finalizerName)
 			if err := r.Update(ctx, &claim); err != nil {
+				log.Error(err, "failed to remove finalizer")
 				return ctrl.Result{}, err
 			}
+			log.Info("finalizer removed")
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(&claim, finalizerName) {
+		log.Info("adding finalizer")
 		controllerutil.AddFinalizer(&claim, finalizerName)
 		if err := r.Update(ctx, &claim); err != nil {
+			log.Error(err, "failed to add finalizer")
 			return ctrl.Result{}, err
 		}
 	}
 
 	// Skip if already successfully assigned
 	if claim.Status.Phase == networkv1alpha1.ClaimPhaseReady && claim.Status.AssignedIP != "" {
+		log.V(1).Info("claim already in Ready state, skipping", "ip", claim.Status.AssignedIP)
 		return ctrl.Result{}, nil
 	}
 
 	// Requeue failed claims after 5 minutes for retry
 	if claim.Status.Phase == networkv1alpha1.ClaimPhaseFailed {
+		log.Info("claim in Failed state, will retry in 5 minutes", "message", claim.Status.Message)
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
+
+	log.Info("starting IP allocation", "pool", claim.Spec.PoolName, "router", claim.Spec.Router.Host)
 
 	// 0) Generate WAN interface name and MAC if not specified
 	wanIf := claim.Spec.Router.WanInterface
 	if wanIf == "" {
 		// Auto-generate from claim name: sanitize and prefix
 		wanIf = "wan-" + sanitizeName(claim.Name)
+		log.Info("generated WAN interface name", "wanInterface", wanIf)
 	}
 
 	macAddr := claim.Spec.Router.MacAddress
 	if macAddr == "" {
 		// Generate unique locally-administered MAC (02:xx:xx:xx:xx:xx)
 		macAddr = generateUniqueMAC()
+		log.Info("generated MAC address", "macAddress", macAddr)
 	}
 
 	// Store in status (will update at the end)
@@ -128,48 +143,61 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	claim.Status.MacAddress = macAddr
 
 	// 1) Run remote script via SSH -> returns a single IPv4 address on stdout
+	log.Info("connecting to router via SSH", "router", claim.Spec.Router.Host, "port", coalesceInt(claim.Spec.Router.Port, 22), "user", claim.Spec.Router.User)
 	ip, err := r.runRouterScript(ctx, &claim, wanIf, macAddr)
 	if err != nil {
+		log.Error(err, "router script execution failed")
 		return r.fail(ctx, &claim, fmt.Errorf("router script: %w", err))
 	}
+	log.Info("router script completed successfully", "ip", ip)
 
 	// 2) Validate IP format
 	if net.ParseIP(ip) == nil {
+		log.Error(fmt.Errorf("invalid IP format"), "IP validation failed", "ip", ip)
 		return r.fail(ctx, &claim, fmt.Errorf("invalid IP returned by router: %q", ip))
 	}
+	log.V(1).Info("IP validation successful", "ip", ip)
 
 	// 3) Ensure IP is in the Cilium pool
+	log.Info("adding IP to Cilium pool", "pool", claim.Spec.PoolName, "ip", ip)
 	if err := r.ensureIPInPool(ctx, claim.Spec.PoolName, ip); err != nil {
+		log.Error(err, "failed to add IP to pool", "pool", claim.Spec.PoolName)
 		return r.fail(ctx, &claim, fmt.Errorf("ensure pool: %w", err))
 	}
+	log.Info("IP added to Cilium pool successfully", "pool", claim.Spec.PoolName, "ip", ip)
 
 	// 4) Update status with all fields at once (single update to avoid conflicts)
 	claim.Status.AssignedIP = ip
 	claim.Status.Phase = networkv1alpha1.ClaimPhaseReady
 	claim.Status.Message = "Assigned"
 	if err := r.Status().Update(ctx, &claim); err != nil {
+		log.Error(err, "failed to update status")
 		return ctrl.Result{}, err
 	}
 
-	log.Info("public IP assigned", "ip", ip, "pool", claim.Spec.PoolName, "wanIf", wanIf, "mac", macAddr)
+	log.Info("✓ public IP assigned successfully", "ip", ip, "pool", claim.Spec.PoolName, "wanInterface", wanIf, "macAddress", macAddr)
 	return ctrl.Result{}, nil
 }
 
 func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, wanIf, macAddr string) (string, error) {
+	log := ctrllog.FromContext(ctx)
+
 	// SSH secret
+	log.V(1).Info("retrieving SSH secret", "secret", claim.Spec.Router.SSHSecretRef, "namespace", "kube-system")
 	sec := &corev1.Secret{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get SSH secret: %w", err)
 	}
 	key := sec.Data["id_rsa"]
 	if len(key) == 0 {
 		return "", fmt.Errorf("ssh private key not found in secret %s/id_rsa", claim.Spec.Router.SSHSecretRef)
 	}
+	log.V(1).Info("SSH secret retrieved successfully")
 
 	// Dial SSH
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to parse SSH private key: %w", err)
 	}
 
 	conf := &ssh.ClientConfig{
@@ -180,15 +208,17 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 	}
 	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
 
+	log.V(1).Info("establishing SSH connection", "address", addr)
 	conn, err := ssh.Dial("tcp", addr, conf)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to connect via SSH to %s: %w", addr, err)
 	}
 	defer conn.Close()
+	log.V(1).Info("SSH connection established")
 
 	sess, err := conn.NewSession()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create SSH session: %w", err)
 	}
 	defer sess.Close()
 
@@ -197,10 +227,12 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 	cmd := fmt.Sprintf("export WAN_PARENT=%q WAN_IF=%q WAN_MAC=%q && %s",
 		claim.Spec.Router.WanParent, wanIf, macAddr, claim.Spec.Router.Command)
 
+	log.Info("executing router script", "script", claim.Spec.Router.Command, "wanParent", claim.Spec.Router.WanParent, "wanInterface", wanIf, "macAddress", macAddr)
 	out, err := sess.CombinedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, string(out))
 	}
+	log.V(1).Info("script output received", "lines", len(strings.Split(string(out), "\n")))
 
 	// Extract the last non-empty line as the IP address
 	// This allows the script to output debug information on earlier lines
@@ -214,28 +246,40 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 		}
 	}
 
+	if ip == "" {
+		return "", fmt.Errorf("router script produced no output")
+	}
+
+	log.V(1).Info("extracted IP from script output", "ip", ip)
 	return ip, nil
 }
 
 func (r *PublicIPClaimReconciler) ensureIPInPool(ctx context.Context, poolName, ip string) error {
+	log := ctrllog.FromContext(ctx)
+
 	// pick available GVR
+	log.V(1).Info("detecting Cilium API version", "pool", poolName)
 	gvr := gvrPoolV2
 	if _, err := r.Dynamic.Resource(gvr).Get(ctx, poolName, metav1.GetOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
+			log.V(1).Info("pool not found in cilium.io/v2, trying v2alpha1")
 			gvr = gvrPoolV2a
 		} else {
-			return err
+			return fmt.Errorf("failed to check pool: %w", err)
 		}
 	}
+	log.V(1).Info("using Cilium API version", "group", gvr.Group, "version", gvr.Version)
 
+	log.V(1).Info("fetching Cilium pool", "pool", poolName)
 	pool, err := r.Dynamic.Resource(gvr).Get(ctx, poolName, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get pool %s: %w", poolName, err)
 	}
 
 	// Append a new /32 block if it doesn't already exist
 	spec, found, _ := unstructured.NestedSlice(pool.Object, "spec", "blocks")
 	if !found {
+		log.V(1).Info("pool has no existing blocks, creating new list")
 		spec = []interface{}{}
 	}
 
@@ -243,17 +287,24 @@ func (r *PublicIPClaimReconciler) ensureIPInPool(ctx context.Context, poolName, 
 	for _, b := range spec {
 		m := b.(map[string]interface{})
 		if m["cidr"] == cidr { // already present
+			log.Info("IP already exists in pool, skipping", "pool", poolName, "cidr", cidr)
 			return nil
 		}
 	}
 
+	log.Info("adding IP block to pool", "pool", poolName, "cidr", cidr)
 	spec = append(spec, map[string]interface{}{"cidr": cidr})
 	if err := unstructured.SetNestedSlice(pool.Object, spec, "spec", "blocks"); err != nil {
-		return err
+		return fmt.Errorf("failed to set blocks in pool: %w", err)
 	}
 
+	log.V(1).Info("updating pool", "pool", poolName, "totalBlocks", len(spec))
 	_, err = r.Dynamic.Resource(gvr).Update(ctx, pool, metav1.UpdateOptions{})
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update pool %s: %w", poolName, err)
+	}
+
+	return nil
 }
 
 // Helper: sanitize claim name for use in interface name (remove invalid chars)
@@ -299,23 +350,33 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alph
 }
 
 func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) error {
+	log := ctrllog.FromContext(ctx)
+
 	if claim.Status.WanInterface == "" {
+		log.V(1).Info("no WAN interface to clean up, skipping")
 		return nil // Nothing to clean up
 	}
 
+	log.V(1).Info("retrieving SSH secret for cleanup", "secret", claim.Spec.Router.SSHSecretRef)
 	// SSH secret
 	sec := &corev1.Secret{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			log.Error(err, "failed to get SSH secret for cleanup")
+		} else {
+			log.Info("SSH secret not found, skipping cleanup (may have been deleted)")
+		}
 		return client.IgnoreNotFound(err) // Secret might be deleted already
 	}
 	key := sec.Data["id_rsa"]
 	if len(key) == 0 {
+		log.Info("SSH key not found in secret, skipping cleanup")
 		return nil
 	}
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse SSH key for cleanup: %w", err)
 	}
 
 	conf := &ssh.ClientConfig{
@@ -326,15 +387,16 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 	}
 	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
 
+	log.V(1).Info("connecting to router for cleanup", "address", addr)
 	conn, err := ssh.Dial("tcp", addr, conf)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to router for cleanup: %w", err)
 	}
 	defer conn.Close()
 
 	sess, err := conn.NewSession()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create SSH session for cleanup: %w", err)
 	}
 	defer sess.Close()
 
@@ -357,8 +419,16 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 		# Delete the interface
 		ip link del "$WAN_IF" 2>/dev/null || true
 	`, claim.Status.WanInterface)
-	_, err = sess.CombinedOutput(cmd)
-	return err
+
+	log.Info("executing cleanup commands on router", "wanInterface", claim.Status.WanInterface)
+	out, err := sess.CombinedOutput(cmd)
+	if err != nil {
+		log.Error(err, "cleanup script failed", "output", string(out))
+		return fmt.Errorf("failed to execute cleanup: %w", err)
+	}
+	log.V(1).Info("cleanup commands executed successfully")
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
