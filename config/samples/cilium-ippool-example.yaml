@@ -1,0 +1,9 @@
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: public-pool
+spec:
+  blocks: [] # operator will append /32s here
+  serviceSelector:
+    matchLabels:
+      "io.kubernetes.service.namespace": "ingress"

@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: cilium-dhcp-wanip-operator
 repo: serialx.net/cilium-dhcp-wanip-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: false
+  controller: true
+  domain: serialx.net
+  group: network
+  kind: PublicIPClaim
+  path: serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

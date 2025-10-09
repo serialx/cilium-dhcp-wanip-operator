@@ -1,0 +1,143 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: publicipclaims.network.serialx.net
+spec:
+  group: network.serialx.net
+  names:
+    kind: PublicIPClaim
+    listKind: PublicIPClaimList
+    plural: publicipclaims
+    shortNames:
+    - pic
+    - pics
+    singular: publicipclaim
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.poolName
+      name: Pool
+      type: string
+    - jsonPath: .status.assignedIP
+      name: IP
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PublicIPClaim is the Schema for the publicipclaims API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of PublicIPClaim
+            properties:
+              poolName:
+                description: PoolName is the name of the CiliumLoadBalancerIPPool
+                  to update
+                type: string
+              router:
+                description: Router contains the router configuration
+                properties:
+                  command:
+                    default: /usr/local/bin/alloc_public_ip.sh
+                    description: Command is the router script to run (prints only
+                      the public IP)
+                    type: string
+                  host:
+                    description: Host is the router's IP address or hostname
+                    type: string
+                  macAddress:
+                    description: MacAddress is the MAC address for DHCP (auto-generated
+                      if omitted)
+                    pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                    type: string
+                  port:
+                    default: 22
+                    description: Port is the SSH port (defaults to 22)
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  sshSecretRef:
+                    description: 'SSHSecretRef is the name of the secret containing
+                      the SSH private key (key: id_rsa)'
+                    type: string
+                  user:
+                    description: User is the SSH username
+                    type: string
+                  wanInterface:
+                    description: WanInterface is the macvlan interface name (auto-generated
+                      from claim name if omitted)
+                    maxLength: 15
+                    pattern: ^[a-z0-9-]+$
+                    type: string
+                  wanParent:
+                    description: WanParent is the physical WAN interface (e.g., eth9,
+                      eth0)
+                    type: string
+                required:
+                - host
+                - sshSecretRef
+                - user
+                - wanParent
+                type: object
+            required:
+            - poolName
+            - router
+            type: object
+          status:
+            description: status defines the observed state of PublicIPClaim
+            properties:
+              assignedIP:
+                description: AssignedIP is the public IP address that was allocated
+                type: string
+              macAddress:
+                description: MacAddress is the actual MAC address used for DHCP
+                type: string
+              message:
+                description: Message provides additional information about the current
+                  phase
+                type: string
+              phase:
+                description: Phase is the current phase of the claim
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Failed
+                type: string
+              wanInterface:
+                description: WanInterface is the actual interface name created on
+                  the router
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

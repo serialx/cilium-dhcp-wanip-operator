@@ -777,3 +777,76 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 
 * Cilium LB-IPAM pools, blocks (CIDR/range), selectors, and status: [https://docs.cilium.io/en/stable/network/lb-ipam.html](https://docs.cilium.io/en/stable/network/lb-ipam.html)
 * `lbipam.cilium.io/ips` per-service override (advanced): search in Cilium issues/PRs for the annotation semantics.
+
+---
+
+## 11) Implementation Status
+
+### Phase 1: Core Scaffolding ✅
+- [x] Initialize Kubebuilder v4 project
+- [x] Set up project structure
+
+### Phase 2: API Implementation ✅
+- [x] Create PublicIPClaim CRD types (`api/v1alpha1/publicipclaim_types.go`)
+- [x] Generate CRD manifests
+- [x] Generate DeepCopy methods
+
+### Phase 3: Controller Implementation ✅
+- [x] Implement PublicIPClaimReconciler
+  - [x] SSH client for router communication
+  - [x] Router script execution
+  - [x] Cilium pool API version detection (v2/v2alpha1)
+  - [x] IP pool update logic
+  - [x] Status management
+  - [x] MAC address generation
+  - [x] WAN interface name sanitization
+  - [x] Finalizers for cleanup
+- [x] Wire controller in `cmd/main.go`
+
+### Phase 4: RBAC and Deployment ✅
+- [x] Update RBAC for PublicIPClaim CRD
+- [x] Update RBAC for Cilium pools access
+- [x] Update RBAC for Secrets access
+- [x] Auto-generated deployment manifests
+- [ ] Add example PublicIPClaim resources
+
+### Phase 5: Testing and Documentation 📋
+- [ ] Unit tests for controller logic
+- [ ] Integration tests with mock SSH
+- [ ] E2E tests (optional)
+- [ ] Update README with deployment instructions
+
+### Phase 6: Enhancements 📋
+- [ ] Observability (metrics, events)
+- [ ] Webhooks for validation
+- [ ] Router state reconciliation
+- [ ] Pool autoscaler
+
+---
+
+## Current Status (Updated: 2025-10-09)
+
+**Core Implementation: COMPLETE** ✅
+
+The operator is fully implemented and ready for deployment:
+
+- ✅ **CRD**: PublicIPClaim with all fields (RouterSpec, ClaimPhase, Status)
+- ✅ **Controller**: Full reconciliation loop with SSH, IP validation, pool updates, and finalizers
+- ✅ **RBAC**: Auto-generated ClusterRole with all required permissions
+- ✅ **Build**: Operator builds successfully (`make build`)
+- ✅ **Dependencies**: golang.org/x/crypto/ssh added for SSH functionality
+
+**Files Created/Modified:**
+- `api/v1alpha1/publicipclaim_types.go` - Complete CRD definition
+- `internal/controller/publicipclaim_controller.go` - Full controller implementation
+- `cmd/main.go` - Controller registration with Kube/Dynamic clients
+- `config/crd/bases/network.serialx.net_publicipclaims.yaml` - Generated CRD manifest
+- `config/rbac/role.yaml` - Generated RBAC rules
+
+**Next Steps:**
+1. Create example PublicIPClaim YAML (see Section 6)
+2. Deploy to cluster (`make install && make deploy`)
+3. Create router SSH secret
+4. Test with a claim
+5. Add unit/integration tests
+6. Update README with deployment guide

@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- network_v1alpha1_publicipclaim.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

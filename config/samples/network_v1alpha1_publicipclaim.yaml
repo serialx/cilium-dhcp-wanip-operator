@@ -1,0 +1,18 @@
+apiVersion: network.serialx.net/v1alpha1
+kind: PublicIPClaim
+metadata:
+  labels:
+    app.kubernetes.io/name: cilium-dhcp-wanip-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: ip-wan-001
+spec:
+  poolName: public-pool
+  router:
+    host: 192.168.1.1
+    user: root
+    sshSecretRef: router-ssh
+    command: /usr/local/bin/alloc_public_ip.sh
+    wanParent: eth9  # Required: physical WAN interface
+    # wanInterface and macAddress are optional - auto-generated if omitted
+    # wanInterface: wan-custom-001
+    # macAddress: "02:aa:bb:cc:dd:ee"

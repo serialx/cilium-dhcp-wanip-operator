@@ -1,121 +1,256 @@
-# cilium-dhcp-wanip-operator
-// TODO(user): Add simple overview of use/purpose
+# Cilium DHCP WAN IP Operator
+
+A Kubernetes operator that dynamically allocates public IP addresses from your ISP via DHCP and integrates them with Cilium's LoadBalancer IP pools. Perfect for home labs and edge deployments where you want to expose services with multiple public IPs without static IP assignments.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
 
-## Getting Started
+This operator bridges the gap between ISP-provided DHCP addresses and Kubernetes LoadBalancer services. It:
 
-### Prerequisites
-- go version v1.24.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+1. **Allocates Public IPs**: SSHes into your router (UDM-Pro, pfSense, etc.) to create macvlan interfaces and obtain DHCP leases
+2. **Updates Cilium Pools**: Automatically adds allocated IPs to CiliumLoadBalancerIPPool resources
+3. **Manages Lifecycle**: Handles cleanup when IPs are released, including stopping DHCP daemons and removing router interfaces
+4. **Integrates with BGP**: Works with Cilium BGP to advertise routes dynamically (no static routes needed)
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+Perfect for homelabs where you have limited public IPs but want proper LoadBalancer support for services like Ingress controllers, game servers, or VPN endpoints
 
-```sh
-make docker-build docker-push IMG=<some-registry>/cilium-dhcp-wanip-operator:tag
+## How It Works
+
+```
+┌─────────────┐     SSH      ┌──────────────┐
+│  Operator   │─────────────>│    Router    │
+│   (K8s)     │              │  (UDM/etc)   │
+└─────────────┘              └──────────────┘
+      │                             │
+      │ 1. Create macvlan          │ 2. DHCP lease
+      │    interface                │    from ISP
+      │                             │
+      │ 3. Configure                │ 4. Proxy ARP
+      │    proxy ARP                │    enabled
+      │                             │
+      v                             v
+┌─────────────┐              ┌──────────────┐
+│   Cilium    │<─── BGP ────>│  WAN/ISP     │
+│  IP Pool    │              │  Network     │
+└─────────────┘              └──────────────┘
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+**Traffic Flow**: Internet → Router WAN (proxy ARP) → Router BGP table → K8s via LAN → Cilium LoadBalancer → Service
 
-**Install the CRDs into the cluster:**
+## Quick Start
 
-```sh
+### Prerequisites
+
+**Infrastructure:**
+- Kubernetes v1.16+ cluster with Cilium installed
+- Cilium BGP configured and peering with your router
+- Router with SSH access (UDM-Pro, pfSense, Linux-based routers)
+
+**Development (optional):**
+- Go 1.24.0+
+- Docker 17.03+
+- kubectl 1.11.3+
+
+### Installation
+
+**1. Install the router script**
+
+Copy the allocation script to your router:
+
+```bash
+scp config/samples/router-script-example.sh root@192.168.1.1:/data/cilium-dhcp-wanip-operator/alloc_public_ip.sh
+# /data path is persistent on UDM Pro routers UniFi OS 2+
+ssh root@192.168.1.1 "chmod +x /data/cilium-dhcp-wanip-operator/alloc_public_ip.sh"
+```
+
+**2. Create SSH secret**
+
+```bash
+ssh-keygen -t ed25519 -f ssh_id_m2m_router -N "" -C "cilium-dhcp-wanip-operator ssh key"
+kubectl -n kube-system create secret generic router-ssh \
+  --from-file=id_rsa=ssh_id_m2m_router
+```
+
+**3. Install CRDs**
+
+```bash
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+**4. Deploy operator**
 
-```sh
-make deploy IMG=<some-registry>/cilium-dhcp-wanip-operator:tag
+```bash
+# Build and push (or use pre-built image)
+export IMG=<your-registry>/cilium-dhcp-wanip-operator:latest
+make docker-build docker-push IMG=$IMG
+
+# Deploy to cluster
+make deploy IMG=$IMG
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+**5. Create a Cilium IP Pool**
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```bash
+kubectl apply -f config/samples/cilium-ippool-example.yaml
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+**6. Create a PublicIPClaim**
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
+```yaml
+apiVersion: network.serialx.net/v1alpha1
+kind: PublicIPClaim
+metadata:
+  name: ip-wan-001
+spec:
+  poolName: public-pool
+  router:
+    host: 192.168.1.1
+    user: root
+    sshSecretRef: router-ssh
+    wanParent: eth9  # Your router's WAN interface
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+```bash
+kubectl apply -f config/samples/network_v1alpha1_publicipclaim.yaml
+```
 
-```sh
+**7. Verify**
+
+```bash
+kubectl get publicipclaims
+# NAME         POOL          IP               PHASE   AGE
+# ip-wan-001   public-pool   203.0.113.45     Ready   1m
+```
+
+📚 **See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions**
+
+## Key Features
+
+- ✅ **Automatic IP Allocation**: Creates macvlan interfaces and obtains DHCP leases via SSH
+- ✅ **Cilium Integration**: Updates CiliumLoadBalancerIPPool with allocated IPs
+- ✅ **BGP-Ready**: Works with Cilium BGP for dynamic route advertisement
+- ✅ **Proxy ARP**: Configures router to answer ARP for allocated IPs
+- ✅ **Auto-Cleanup**: Finalizers ensure proper cleanup on deletion
+- ✅ **MAC Generation**: Auto-generates unique MAC addresses for each claim
+- ✅ **API Version Detection**: Supports both Cilium v2 and v2alpha1 APIs
+- ✅ **Status Tracking**: Full status reporting with phase, IP, interface, and MAC
+
+## Examples
+
+### Basic Claim
+
+```yaml
+apiVersion: network.serialx.net/v1alpha1
+kind: PublicIPClaim
+metadata:
+  name: ingress-ip
+spec:
+  poolName: public-pool
+  router:
+    host: 192.168.1.1
+    user: root
+    sshSecretRef: router-ssh
+    wanParent: eth9
+```
+
+### Claim with Custom Interface and MAC
+
+```yaml
+apiVersion: network.serialx.net/v1alpha1
+kind: PublicIPClaim
+metadata:
+  name: game-server-ip
+spec:
+  poolName: game-pool
+  router:
+    host: 192.168.1.1
+    port: 22
+    user: admin
+    sshSecretRef: router-ssh
+    command: /usr/local/bin/alloc_public_ip.sh
+    wanParent: eth9
+    wanInterface: wan-game
+    macAddress: "02:aa:bb:cc:dd:01"
+```
+
+## Architecture Details
+
+See [SPEC.md](SPEC.md) for complete architecture documentation including:
+- Router script implementation (proxy ARP + Cilium BGP)
+- CRD schema and validation
+- Controller reconciliation logic
+- Finalizer cleanup process
+- Networking details (rp_filter, BGP routing, etc.)
+
+## Development
+
+**Run locally:**
+
+```bash
+make run
+```
+
+**Build:**
+
+```bash
+make build
+```
+
+**Run tests:**
+
+```bash
+make test
+```
+
+**Generate manifests:**
+
+```bash
+make manifests generate
+```
+
+## Uninstall
+
+```bash
+# Delete all claims
+kubectl delete publicipclaims --all
+
+# Undeploy operator
+make undeploy
+
+# Remove CRDs
 make uninstall
 ```
 
-**UnDeploy the controller from the cluster:**
+## Troubleshooting
 
-```sh
-make undeploy
+**Check operator logs:**
+
+```bash
+kubectl -n cilium-dhcp-wanip-operator-system logs deployment/cilium-dhcp-wanip-operator-controller-manager
 ```
 
-## Project Distribution
+**Check claim status:**
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/cilium-dhcp-wanip-operator:tag
+```bash
+kubectl describe publicipclaim <name>
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/cilium-dhcp-wanip-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+**Common issues:**
+- SSH authentication fails → Check SSH key in secret
+- DHCP fails → Verify `wanParent` interface name
+- IP not added to pool → Check RBAC permissions for Cilium resources
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests: `make test`
+5. Submit a pull request
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Run `make help` for all available make targets.
+
+More information: [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
 ## License
 

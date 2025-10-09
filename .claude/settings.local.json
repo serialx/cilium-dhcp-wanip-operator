@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kubebuilder create api:*)",
+      "Bash(go get:*)",
+      "Bash(go mod:*)",
+      "Bash(make:*)",
+      "Bash(go list:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -27,6 +27,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -34,6 +36,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
+	"serialx.net/cilium-dhcp-wanip-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -45,6 +50,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(networkv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -174,6 +180,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.PublicIPClaimReconciler{
+		Client:  mgr.GetClient(),
+		Kube:    kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+		Dynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
+		Scheme:  mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PublicIPClaim")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
