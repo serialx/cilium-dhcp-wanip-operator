@@ -117,11 +117,20 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			log.Error(err, "failed to add finalizer")
 			return ctrl.Result{}, err
 		}
+		// Return to trigger a new reconcile with the finalizer present
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Skip if already successfully assigned
 	if claim.Status.Phase == networkv1alpha1.ClaimPhaseReady && claim.Status.AssignedIP != "" {
 		log.V(1).Info("claim already in Ready state, skipping", "ip", claim.Status.AssignedIP)
+		return ctrl.Result{}, nil
+	}
+
+	// Skip if work is already in progress (WanInterface populated but not Ready yet)
+	// This prevents duplicate reconciles from running the router script concurrently
+	if claim.Status.WanInterface != "" && claim.Status.Phase != networkv1alpha1.ClaimPhaseFailed {
+		log.V(1).Info("allocation already in progress, skipping", "wanInterface", claim.Status.WanInterface)
 		return ctrl.Result{}, nil
 	}
 
@@ -148,9 +157,15 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("generated MAC address", "macAddress", macAddr)
 	}
 
-	// Store in status (will update at the end)
+	// Persist WAN interface and MAC address BEFORE running script
+	// This allows concurrent reconciles to detect work in progress
 	claim.Status.WanInterface = wanIf
 	claim.Status.MacAddress = macAddr
+	if err := r.Status().Update(ctx, &claim); err != nil {
+		log.Error(err, "failed to update status with WanInterface")
+		return ctrl.Result{}, err
+	}
+	log.V(1).Info("status updated with WanInterface and MacAddress", "wanInterface", wanIf, "macAddress", macAddr)
 
 	// 1) Run remote script via SSH -> returns a single IPv4 address on stdout
 	log.Info("connecting to router via SSH", "router", claim.Spec.Router.Host, "port", coalesceInt(claim.Spec.Router.Port, 22), "user", claim.Spec.Router.User)
