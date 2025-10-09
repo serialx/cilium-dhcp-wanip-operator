@@ -123,12 +123,9 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		macAddr = generateUniqueMAC()
 	}
 
-	// Store in status for tracking
+	// Store in status (will update at the end)
 	claim.Status.WanInterface = wanIf
 	claim.Status.MacAddress = macAddr
-	if err := r.Status().Update(ctx, &claim); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// 1) Run remote script via SSH -> returns a single IPv4 address on stdout
 	ip, err := r.runRouterScript(ctx, &claim, wanIf, macAddr)
@@ -146,7 +143,7 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.fail(ctx, &claim, fmt.Errorf("ensure pool: %w", err))
 	}
 
-	// 4) Update status
+	// 4) Update status with all fields at once (single update to avoid conflicts)
 	claim.Status.AssignedIP = ip
 	claim.Status.Phase = networkv1alpha1.ClaimPhaseReady
 	claim.Status.Message = "Assigned"
