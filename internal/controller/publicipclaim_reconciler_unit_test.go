@@ -36,8 +36,8 @@ func TestReconcileValidationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error on first reconcile: %v", err)
 	}
-	if !res.Requeue {
-		t.Fatalf("expected requeue after adding finalizer")
+	if res == (ctrl.Result{}) {
+		t.Fatalf("expected non-zero result to trigger requeue")
 	}
 
 	// Second reconcile should fail validation and set status to Failed
@@ -61,6 +61,7 @@ func TestReconcileValidationFailure(t *testing.T) {
 
 func TestReconcileSuccess(t *testing.T) {
 	scheme := runtimeScheme(t)
+	const assignedTestIP = "203.0.113.10"
 	claim := &networkv1alpha1.PublicIPClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "prod-claim-alpha",
@@ -105,14 +106,14 @@ func TestReconcileSuccess(t *testing.T) {
 		if macAddr == "" {
 			t.Fatalf("expected MAC address to be generated")
 		}
-		return "203.0.113.10", nil
+		return assignedTestIP, nil
 	}
 	r.ensureIPInPoolFn = func(ctx context.Context, poolName, ip string) error {
 		ensured = true
 		if poolName != claim.Spec.PoolName {
 			t.Fatalf("unexpected pool name: %s", poolName)
 		}
-		if ip != "203.0.113.10" {
+		if ip != assignedTestIP {
 			t.Fatalf("unexpected ip: %s", ip)
 		}
 		return nil
@@ -143,7 +144,7 @@ func TestReconcileSuccess(t *testing.T) {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if updated.Status.AssignedIP != "203.0.113.10" {
+	if updated.Status.AssignedIP != assignedTestIP {
 		t.Fatalf("unexpected assigned IP: %s", updated.Status.AssignedIP)
 	}
 	if updated.Status.Phase != networkv1alpha1.ClaimPhaseReady {
