@@ -46,12 +46,35 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 - Cilium BGP configured and peering with your router
 - Router with SSH access (UDM-Pro, pfSense, Linux-based routers)
 
-**Development (optional):**
+**Development (optional - only needed if building from source):**
 - Go 1.24.0+
 - Docker 17.03+
 - kubectl 1.11.3+
 
 ### Installation
+
+**Option A: Quick Install (Recommended - Uses pre-built images)**
+
+Deploy the operator directly from the release manifest:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.1.0/dist/install.yaml
+```
+
+This will:
+- Create the `cilium-dhcp-wanip-operator-system` namespace
+- Install the `PublicIPClaim` CRD
+- Deploy the operator controller with image `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.1.0`
+- Set up necessary RBAC permissions
+
+Verify the installation:
+
+```bash
+kubectl get pods -n cilium-dhcp-wanip-operator-system
+# You should see the controller manager pod running
+```
+
+**Option B: Build and Deploy from Source**
 
 **1. Install the router script**
 
@@ -236,6 +259,18 @@ make manifests generate
 ```
 
 ## Uninstall
+
+**If installed via Quick Install (Option A):**
+
+```bash
+# Delete all claims first to ensure proper cleanup
+kubectl delete publicipclaims --all
+
+# Remove the operator
+kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.1.0/dist/install.yaml
+```
+
+**If installed from source (Option B):**
 
 ```bash
 # Delete all claims
