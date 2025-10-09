@@ -73,12 +73,28 @@ var _ = Describe("PublicIPClaim Controller", func() {
 				Scheme: k8sClient.Scheme(),
 			}
 
+			// First reconcile adds the finalizer and requeues
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			// Second reconcile will perform validation
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+
+			// The reconcile should handle the resource without crashing,
+			// but since we're not providing required fields (poolName, router config),
+			// it should set the status to Failed with validation error
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("is required"))
+
+			// Verify the claim was updated with Failed status
+			err = k8sClient.Get(ctx, typeNamespacedName, publicipclaim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(publicipclaim.Status.Phase).To(Equal(networkv1alpha1.ClaimPhaseFailed))
+			Expect(publicipclaim.Status.Message).To(ContainSubstring("is required"))
 		})
 	})
 })

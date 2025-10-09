@@ -140,6 +140,32 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
 
+	// Validate required fields before attempting allocation
+	if claim.Spec.PoolName == "" {
+		log.Info("poolName not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.poolName is required"))
+	}
+	if claim.Spec.Router.Host == "" {
+		log.Info("router host not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.router.host is required"))
+	}
+	if claim.Spec.Router.SSHSecretRef == "" {
+		log.Info("SSH secret ref not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.router.sshSecretRef is required"))
+	}
+	if claim.Spec.Router.User == "" {
+		log.Info("router user not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.router.user is required"))
+	}
+	if claim.Spec.Router.WanParent == "" {
+		log.Info("WAN parent interface not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.router.wanParent is required"))
+	}
+	if claim.Spec.Router.Command == "" {
+		log.Info("router command not specified, skipping allocation")
+		return r.fail(ctx, &claim, fmt.Errorf("spec.router.command is required"))
+	}
+
 	log.Info("starting IP allocation", "pool", claim.Spec.PoolName, "router", claim.Spec.Router.Host)
 
 	// 0) Generate WAN interface name and MAC if not specified
@@ -210,7 +236,7 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 	// SSH secret
 	log.V(1).Info("retrieving SSH secret", "secret", claim.Spec.Router.SSHSecretRef, "namespace", "kube-system")
 	sec := &corev1.Secret{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
 		return "", fmt.Errorf("failed to get SSH secret: %w", err)
 	}
 	key := sec.Data["id_rsa"]
@@ -238,14 +264,14 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 	if err != nil {
 		return "", fmt.Errorf("failed to connect via SSH to %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	log.V(1).Info("SSH connection established")
 
 	sess, err := conn.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("failed to create SSH session: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Set environment variables for the script
 	// Using export ensures variables work regardless of shell
@@ -419,7 +445,7 @@ func sanitizeName(name string) string {
 // Helper: generate unique locally-administered unicast MAC (02:xx:xx:xx:xx:xx)
 func generateUniqueMAC() string {
 	buf := make([]byte, 5)
-	rand.Read(buf)
+	_, _ = rand.Read(buf) // Error can be safely ignored - rand.Read from crypto/rand always returns nil error
 	// Set locally administered bit (bit 1 of first octet) and unicast (bit 0 = 0)
 	return fmt.Sprintf("02:%02x:%02x:%02x:%02x:%02x", buf[0], buf[1], buf[2], buf[3], buf[4])
 }
@@ -453,7 +479,7 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 	log.V(1).Info("retrieving SSH secret for cleanup", "secret", claim.Spec.Router.SSHSecretRef)
 	// SSH secret
 	sec := &corev1.Secret{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			log.Error(err, "failed to get SSH secret for cleanup")
 		} else {
@@ -485,13 +511,13 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 	if err != nil {
 		return fmt.Errorf("failed to connect to router for cleanup: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	sess, err := conn.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create SSH session for cleanup: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	// Kill udhcpc daemon, remove proxy ARP, and delete the interface
 	cmd := fmt.Sprintf(`
