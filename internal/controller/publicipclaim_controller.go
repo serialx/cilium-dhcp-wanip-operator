@@ -61,7 +61,7 @@ type PublicIPClaimReconciler struct {
 // +kubebuilder:rbac:groups=network.serialx.net,resources=publicipclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=network.serialx.net,resources=publicipclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cilium.io,resources=ciliumloadbalancerippools,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to

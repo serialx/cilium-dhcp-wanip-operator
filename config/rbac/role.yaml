@@ -8,11 +8,6 @@ rules:
   - ""
   resources:
   - secrets
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
   - services
   verbs:
   - get
