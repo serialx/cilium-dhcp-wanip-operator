@@ -21,12 +21,13 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 │   (K8s)     │              │  (UDM/etc)   │
 └─────────────┘              └──────────────┘
       │                             │
-      │ 1. Create macvlan          │ 2. DHCP lease
+      │ 1. Create macvlan           │ 2. DHCP lease
       │    interface                │    from ISP
       │                             │
       │ 3. Configure                │ 4. Proxy ARP
       │    proxy ARP                │    enabled
       │                             │
+      │ 5. Add IP to Pool           │
       v                             v
 ┌─────────────┐              ┌──────────────┐
 │   Cilium    │<─── BGP ────>│  WAN/ISP     │
