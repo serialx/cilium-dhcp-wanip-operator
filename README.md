@@ -352,6 +352,23 @@ kubectl describe publicipclaim <name>
 - DHCP fails → Verify `wanParent` interface name
 - IP not added to pool → Check RBAC permissions for Cilium resources
 
+## Known Limitations
+
+### Router Reboot Persistence
+
+**Current Behavior**: When the router reboots, macvlan interfaces and DHCP daemons created by this operator **do NOT survive** the reboot. After a router restart, the allocated public IPs and their associated network configuration are lost.
+
+**Impact**:
+- Kubernetes `PublicIPClaim` resources will still exist and show status as `Ready`
+- However, the actual network configuration on the router is gone
+- Services using the allocated IPs will become unreachable until the configuration is restored
+
+**Workaround**: Manually re-apply (delete and recreate) the `PublicIPClaim` resources after a router reboot to restore the configuration.
+
+**Future Improvement**: This limitation is tracked for future enhancement. Potential solutions include:
+- Implementing automatic reconciliation to detect and restore lost router configurations
+- Health checks to detect when router configuration is out of sync with K8s state
+
 ## Contributing
 
 Contributions are welcome! Please:
