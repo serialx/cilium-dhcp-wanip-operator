@@ -32,10 +32,20 @@ set -euo pipefail
 : "${WAN_MAC:?WAN_MAC must be set}"
 
 # 1) Prepare macvlan (bridge mode), no primary IP needed
-ip link show "$WAN_IF" >/dev/null 2>&1 || {
+if ip link show "$WAN_IF" >/dev/null 2>&1; then
+  # Interface exists - verify MAC matches
+  CURRENT_MAC=$(ip link show "$WAN_IF" | awk '/link\/ether/{print $2}')
+  if [ "$CURRENT_MAC" != "$WAN_MAC" ]; then
+    echo "ERROR: Interface $WAN_IF exists with different MAC: $CURRENT_MAC (expected $WAN_MAC)"
+    exit 1
+  fi
+  echo "Interface $WAN_IF already exists with correct MAC"
+else
+  # Create new interface
   ip link add link "$WAN_PARENT" name "$WAN_IF" type macvlan mode bridge
   ip link set "$WAN_IF" address "$WAN_MAC" up
-}
+  echo "Created interface $WAN_IF with MAC $WAN_MAC"
+fi
 
 # 2) Pull an address by DHCP and run daemon to maintain the lease
 #    This will fork to background and handle renewals automatically
@@ -93,73 +103,139 @@ printf "%s\n" "$NEW_IP"
 
 ## 1) CRD: `PublicIPClaim`
 
-```yaml
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: publicipclaims.net.serialx.dev
-spec:
-  group: net.serialx.dev
-  names:
-    kind: PublicIPClaim
-    plural: publicipclaims
-    singular: publicipclaim
-    shortNames: [pic, pics]
-  scope: Cluster
-  versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              properties:
-                poolName:
-                  type: string
-                router:
-                  type: object
-                  properties:
-                    host: { type: string }
-                    port: { type: integer, default: 22 }
-                    user: { type: string }
-                    sshSecretRef: { type: string } # secret with private key in key `id_rsa`
-                    command:
-                      type: string
-                      description: "Router script to run (prints only the public IP)"
-                      default: "/usr/local/bin/alloc_public_ip.sh"
-                    wanParent:
-                      type: string
-                      description: "Physical WAN interface (e.g., eth9, eth0)"
-                    wanInterface:
-                      type: string
-                      description: "Macvlan interface name (auto-generated from claim name if omitted)"
-                      maxLength: 15
-                      pattern: '^[a-z0-9-]+$'
-                    macAddress:
-                      type: string
-                      description: "MAC address for DHCP (auto-generated if omitted)"
-                      pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
-                  required: [host, user, sshSecretRef, wanParent]
-              required: [poolName, router]
-            status:
-              type: object
-              properties:
-                phase: { type: string }
-                message: { type: string }
-                assignedIP: { type: string }
-                wanInterface: { type: string }
-                macAddress: { type: string }
-      subresources:
-        status: {}
+The CRD is defined using Kubebuilder v4 markers in `api/v1alpha1/publicipclaim_types.go`:
+
+```go
+package v1alpha1
+
+import (
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// RouterSpec defines the router configuration for allocating public IPs
+type RouterSpec struct {
+    // Host is the router's IP address or hostname
+    // +kubebuilder:validation:Required
+    Host string `json:"host"`
+
+    // Port is the SSH port (defaults to 22)
+    // +kubebuilder:default=22
+    // +kubebuilder:validation:Minimum=1
+    // +kubebuilder:validation:Maximum=65535
+    // +optional
+    Port int `json:"port,omitempty"`
+
+    // User is the SSH username
+    // +kubebuilder:validation:Required
+    User string `json:"user"`
+
+    // SSHSecretRef is the name of the secret containing the SSH private key (key: id_rsa)
+    // +kubebuilder:validation:Required
+    SSHSecretRef string `json:"sshSecretRef"`
+
+    // Command is the router script to run (prints only the public IP)
+    // +kubebuilder:default="/usr/local/bin/alloc_public_ip.sh"
+    // +optional
+    Command string `json:"command,omitempty"`
+
+    // WanParent is the physical WAN interface (e.g., eth9, eth0)
+    // +kubebuilder:validation:Required
+    WanParent string `json:"wanParent"`
+
+    // WanInterface is the macvlan interface name (auto-generated from claim name if omitted)
+    // +kubebuilder:validation:MaxLength=15
+    // +kubebuilder:validation:Pattern="^[a-z0-9-]+$"
+    // +optional
+    WanInterface string `json:"wanInterface,omitempty"`
+
+    // MacAddress is the MAC address for DHCP (auto-generated if omitted)
+    // +kubebuilder:validation:Pattern="^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
+    // +optional
+    MacAddress string `json:"macAddress,omitempty"`
+}
+
+// ClaimPhase represents the current phase of a PublicIPClaim
+type ClaimPhase string
+
+const (
+    ClaimPhasePending      ClaimPhase = "Pending"
+    ClaimPhaseProvisioning ClaimPhase = "Provisioning"
+    ClaimPhaseReady        ClaimPhase = "Ready"
+    ClaimPhaseFailed       ClaimPhase = "Failed"
+)
+
+// PublicIPClaimSpec defines the desired state of PublicIPClaim
+type PublicIPClaimSpec struct {
+    // PoolName is the name of the CiliumLoadBalancerIPPool to update
+    // +kubebuilder:validation:Required
+    PoolName string `json:"poolName"`
+
+    // Router contains the router configuration
+    // +kubebuilder:validation:Required
+    Router RouterSpec `json:"router"`
+}
+
+// PublicIPClaimStatus defines the observed state of PublicIPClaim
+type PublicIPClaimStatus struct {
+    // Phase is the current phase of the claim
+    // +kubebuilder:validation:Enum=Pending;Provisioning;Ready;Failed
+    // +optional
+    Phase ClaimPhase `json:"phase,omitempty"`
+
+    // Message provides additional information about the current phase
+    // +optional
+    Message string `json:"message,omitempty"`
+
+    // AssignedIP is the public IP address that was allocated
+    // +optional
+    AssignedIP string `json:"assignedIP,omitempty"`
+
+    // WanInterface is the actual interface name created on the router
+    // +optional
+    WanInterface string `json:"wanInterface,omitempty"`
+
+    // MacAddress is the actual MAC address used for DHCP
+    // +optional
+    MacAddress string `json:"macAddress,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster,shortName=pic;pics
+// +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.poolName`
+// +kubebuilder:printcolumn:name="IP",type=string,JSONPath=`.status.assignedIP`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// PublicIPClaim is the Schema for the publicipclaims API
+type PublicIPClaim struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec   PublicIPClaimSpec   `json:"spec,omitempty"`
+    Status PublicIPClaimStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// PublicIPClaimList contains a list of PublicIPClaim
+type PublicIPClaimList struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    Items           []PublicIPClaim `json:"items"`
+}
+
+func init() {
+    SchemeBuilder.Register(&PublicIPClaim{}, &PublicIPClaimList{})
+}
 ```
+
+After creating this file, run `make manifests` to generate the CRD YAML in `config/crd/bases/`.
 
 ### Example claim
 
 ```yaml
-apiVersion: net.serialx.dev/v1alpha1
+apiVersion: serialx.net/v1alpha1
 kind: PublicIPClaim
 metadata:
   name: ip-wan-001
@@ -187,13 +263,17 @@ metadata:
   name: cilium-lbip-operator
 rules:
   # our CRD
-  - apiGroups: ["net.serialx.dev"]
+  - apiGroups: ["serialx.net"]
     resources: ["publicipclaims", "publicipclaims/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # cilium pools (support both API versions)
   - apiGroups: ["cilium.io"]
     resources: ["ciliumloadbalancerippools"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # secrets for SSH keys
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   # services if you later want selectors or annotations
   - apiGroups: [""]
     resources: ["services"]
@@ -221,63 +301,12 @@ subjects:
 
 ## 3) Controller (Go, Kubebuilder)
 
-### `api/v1alpha1/publicipclaim_types.go`
+> **Note**: The API types are now defined in Section 1 with full Kubebuilder markers. This section focuses on the controller implementation.
+
+### `internal/controller/publicipclaim_controller.go`
 
 ```go
-package v1alpha1
-
-import (
-    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-type RouterSpec struct {
-    Host         string `json:"host"`
-    Port         int    `json:"port,omitempty"`
-    User         string `json:"user"`
-    SSHSecretRef string `json:"sshSecretRef"`
-    Command      string `json:"command,omitempty"`
-    WanParent    string `json:"wanParent"`               // Required: physical interface (eth9, eth0, etc.)
-    WanInterface string `json:"wanInterface,omitempty"`  // Optional: auto-generated from claim name
-    MacAddress   string `json:"macAddress,omitempty"`    // Optional: auto-generated unique MAC
-}
-
-type PublicIPClaimSpec struct {
-    PoolName   string     `json:"poolName"`
-    Router     RouterSpec `json:"router"`
-}
-
-type PublicIPClaimStatus struct {
-    Phase        string `json:"phase,omitempty"`
-    Message      string `json:"message,omitempty"`
-    AssignedIP   string `json:"assignedIP,omitempty"`
-    WanInterface string `json:"wanInterface,omitempty"`  // Actual interface created
-    MacAddress   string `json:"macAddress,omitempty"`    // Actual MAC used
-}
-
-// +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
-
-type PublicIPClaim struct {
-    metav1.TypeMeta   `json:",inline"`
-    metav1.ObjectMeta `json:"metadata,omitempty"`
-
-    Spec   PublicIPClaimSpec   `json:"spec,omitempty"`
-    Status PublicIPClaimStatus `json:"status,omitempty"`
-}
-
-// +kubebuilder:object:root=true
-
-type PublicIPClaimList struct {
-    metav1.TypeMeta `json:",inline"`
-    metav1.ListMeta `json:"metadata,omitempty"`
-    Items           []PublicIPClaim `json:"items"`
-}
-```
-
-### `controllers/publicipclaim_controller.go`
-
-```go
-package controllers
+package controller
 
 import (
     "context"
@@ -301,7 +330,7 @@ import (
     "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
     ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-    netv1alpha1 "github.com/your/module/api/v1alpha1"
+    netv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
 )
 
 // GVRs for Cilium pool (try v2 first, then v2alpha1)
@@ -325,9 +354,14 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
         return ctrl.Result{}, client.IgnoreNotFound(err)
     }
 
-    // Already done
-    if claim.Status.AssignedIP != "" {
+    // Skip if already successfully assigned
+    if claim.Status.Phase == netv1alpha1.ClaimPhaseReady && claim.Status.AssignedIP != "" {
         return ctrl.Result{}, nil
+    }
+
+    // Requeue failed claims after 5 minutes for retry
+    if claim.Status.Phase == netv1alpha1.ClaimPhaseFailed {
+        return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
     }
 
     // 0) Generate WAN interface name and MAC if not specified
@@ -368,7 +402,7 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
     // 4) Update status
     claim.Status.AssignedIP = ip
-    claim.Status.Phase = "Ready"
+    claim.Status.Phase = netv1alpha1.ClaimPhaseReady
     claim.Status.Message = "Assigned"
     if err := r.Status().Update(ctx, &claim); err != nil {
         return ctrl.Result{}, err
@@ -405,10 +439,10 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
     defer sess.Close()
 
     // Set environment variables for the script
-    envVars := fmt.Sprintf("WAN_PARENT=%s WAN_IF=%s WAN_MAC=%s",
-        claim.Spec.Router.WanParent, wanIf, macAddr)
+    // Using export ensures variables work regardless of shell
+    cmd := fmt.Sprintf("export WAN_PARENT=%q WAN_IF=%q WAN_MAC=%q && %s",
+        claim.Spec.Router.WanParent, wanIf, macAddr, claim.Spec.Router.Command)
 
-    cmd := fmt.Sprintf("%s %s", envVars, claim.Spec.Router.Command)
     out, err := sess.CombinedOutput(cmd)
     if err != nil { return "", fmt.Errorf("%v: %s", err, string(out)) }
 
@@ -483,7 +517,7 @@ func coalesceInt(a, b int) int {
 
 // Helper: update status to failed state
 func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *netv1alpha1.PublicIPClaim, err error) (ctrl.Result, error) {
-    claim.Status.Phase = "Failed"
+    claim.Status.Phase = netv1alpha1.ClaimPhaseFailed
     claim.Status.Message = err.Error()
     if updateErr := r.Status().Update(ctx, claim); updateErr != nil {
         return ctrl.Result{}, updateErr
@@ -492,45 +526,38 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *netv1alpha1.P
 }
 ```
 
-### `main.go` (skeleton)
+### `cmd/main.go` (integration)
+
+The main entry point should integrate the controller with proper leader election and clients:
 
 ```go
-package main
+// In cmd/main.go, add the controller setup after the scaffold marker
 
 import (
-    "flag"
-    "os"
-
     "k8s.io/client-go/dynamic"
     "k8s.io/client-go/kubernetes"
-    ctrl "sigs.k8s.io/controller-runtime"
-    "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-    netv1alpha1 "github.com/your/module/api/v1alpha1"
-    "github.com/your/module/controllers"
+    netv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
+    "serialx.net/cilium-dhcp-wanip-operator/internal/controller"
 )
 
-func main() {
-    var metricsAddr string
-    flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-    flag.Parse()
-
-    ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-
-    mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{MetricsBindAddress: metricsAddr})
-    if err != nil { panic(err) }
-
-    if err := netv1alpha1.AddToScheme(mgr.GetScheme()); err != nil { panic(err) }
-
-    if err := (&controllers.PublicIPClaimReconciler{
-        Client:  mgr.GetClient(),
-        Kube:    kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-        Dynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
-        Scheme:  mgr.GetScheme(),
-    }).SetupWithManager(mgr); err != nil { panic(err) }
-
-    if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil { panic(err) }
+func init() {
+    utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+    utilruntime.Must(netv1alpha1.AddToScheme(scheme))
+    // +kubebuilder:scaffold:scheme
 }
+
+// In main(), after manager creation, register the controller:
+if err = (&controller.PublicIPClaimReconciler{
+    Client:  mgr.GetClient(),
+    Kube:    kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+    Dynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
+    Scheme:  mgr.GetScheme(),
+}).SetupWithManager(mgr); err != nil {
+    setupLog.Error(err, "unable to create controller", "controller", "PublicIPClaim")
+    os.Exit(1)
+}
+// +kubebuilder:scaffold:builder
 ```
 
 ### Controller wiring
@@ -583,7 +610,7 @@ spec:
 ## 6) Claim a new IP
 
 ```yaml
-apiVersion: net.serialx.dev/v1alpha1
+apiVersion: serialx.net/v1alpha1
 kind: PublicIPClaim
 metadata:
   name: ip-wan-001
@@ -601,7 +628,7 @@ Watch:
 
 ```sh
 kubectl get ippools.cilium.io
-kubectl get publicipclaims.net.serialx.dev -w -o wide
+kubectl get publicipclaims.serialx.net -w -o wide
 ```
 
 When ready you should see the pool gain a new block:
@@ -619,7 +646,7 @@ spec:
 When a `PublicIPClaim` is deleted, you should clean up the router-side macvlan interface. Add a finalizer to the controller:
 
 ```go
-const finalizerName = "net.serialx.dev/cleanup-wan-interface"
+const finalizerName = "serialx.net/cleanup-wan-interface"
 
 func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     log := ctrllog.FromContext(ctx)

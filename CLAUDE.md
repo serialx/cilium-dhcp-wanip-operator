@@ -101,7 +101,7 @@ make build-installer IMG=<registry>/cilium-dhcp-wanip-operator:tag
 This is a Kubebuilder v4 project. Version details:
 - **CLI Version**: 4.9.0
 - **Layout**: go.kubebuilder.io/v4
-- **Domain**: `net.serialx`
+- **Domain**: `serialx.net`
 - **Minimum Kubernetes**: 1.16+
 - **Kustomize**: v5.x
 

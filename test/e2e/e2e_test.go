@@ -30,7 +30,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"net.serialx/cilium-dhcp-wanip-operator/test/utils"
+	"serialx.net/cilium-dhcp-wanip-operator/test/utils"
 )
 
 // namespace where the project is deployed in

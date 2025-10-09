@@ -1,4 +1,4 @@
-module net.serialx/cilium-dhcp-wanip-operator
+module serialx.net/cilium-dhcp-wanip-operator
 
 go 1.24.5
 

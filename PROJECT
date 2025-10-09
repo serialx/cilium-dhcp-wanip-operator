@@ -3,9 +3,9 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.9.0
-domain: net.serialx
+domain: serialx.net
 layout:
 - go.kubebuilder.io/v4
 projectName: cilium-dhcp-wanip-operator
-repo: net.serialx/cilium-dhcp-wanip-operator
+repo: serialx.net/cilium-dhcp-wanip-operator
 version: "3"
