@@ -5,7 +5,9 @@
       "Bash(go get:*)",
       "Bash(go mod:*)",
       "Bash(make:*)",
-      "Bash(go list:*)"
+      "Bash(go list:*)",
+      "Bash(kubectl get pods:*)",
+      "Bash(kubectl get:*)",
     ],
     "deny": [],
     "ask": []
