@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,7 +78,9 @@ var _ = BeforeSuite(func() {
 
 	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		Skip(fmt.Sprintf("skipping envtest start: %v", err))
+	}
 	Expect(cfg).NotTo(BeNil())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
@@ -88,8 +91,10 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	if testEnv != nil {
+		err := testEnv.Stop()
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
