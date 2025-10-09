@@ -55,6 +55,11 @@ type PublicIPClaimReconciler struct {
 	Kube    *kubernetes.Clientset
 	Dynamic dynamic.Interface
 	Scheme  *runtime.Scheme
+
+	runRouterScriptFn        func(context.Context, *networkv1alpha1.PublicIPClaim, string, string) (string, error)
+	ensureIPInPoolFn         func(context.Context, string, string) error
+	removeIPFromPoolFn       func(context.Context, string, string) error
+	cleanupRouterInterfaceFn func(context.Context, *networkv1alpha1.PublicIPClaim) error
 }
 
 // +kubebuilder:rbac:groups=network.serialx.net,resources=publicipclaims,verbs=get;list;watch;create;update;patch;delete
@@ -231,6 +236,13 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, wanIf, macAddr string) (string, error) {
+	if r.runRouterScriptFn != nil {
+		return r.runRouterScriptFn(ctx, claim, wanIf, macAddr)
+	}
+	return r.defaultRunRouterScript(ctx, claim, wanIf, macAddr)
+}
+
+func (r *PublicIPClaimReconciler) defaultRunRouterScript(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, wanIf, macAddr string) (string, error) {
 	log := ctrllog.FromContext(ctx)
 
 	// SSH secret
@@ -306,6 +318,13 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 }
 
 func (r *PublicIPClaimReconciler) ensureIPInPool(ctx context.Context, poolName, ip string) error {
+	if r.ensureIPInPoolFn != nil {
+		return r.ensureIPInPoolFn(ctx, poolName, ip)
+	}
+	return r.defaultEnsureIPInPool(ctx, poolName, ip)
+}
+
+func (r *PublicIPClaimReconciler) defaultEnsureIPInPool(ctx context.Context, poolName, ip string) error {
 	log := ctrllog.FromContext(ctx)
 
 	// pick available GVR
@@ -359,6 +378,13 @@ func (r *PublicIPClaimReconciler) ensureIPInPool(ctx context.Context, poolName, 
 }
 
 func (r *PublicIPClaimReconciler) removeIPFromPool(ctx context.Context, poolName, ip string) error {
+	if r.removeIPFromPoolFn != nil {
+		return r.removeIPFromPoolFn(ctx, poolName, ip)
+	}
+	return r.defaultRemoveIPFromPool(ctx, poolName, ip)
+}
+
+func (r *PublicIPClaimReconciler) defaultRemoveIPFromPool(ctx context.Context, poolName, ip string) error {
 	log := ctrllog.FromContext(ctx)
 
 	if ip == "" {
@@ -469,6 +495,13 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alph
 }
 
 func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) error {
+	if r.cleanupRouterInterfaceFn != nil {
+		return r.cleanupRouterInterfaceFn(ctx, claim)
+	}
+	return r.defaultCleanupRouterInterface(ctx, claim)
+}
+
+func (r *PublicIPClaimReconciler) defaultCleanupRouterInterface(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) error {
 	log := ctrllog.FromContext(ctx)
 
 	if claim.Status.WanInterface == "" {
