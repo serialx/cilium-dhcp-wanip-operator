@@ -205,7 +205,18 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 		return "", fmt.Errorf("%v: %s", err, string(out))
 	}
 
-	ip := strings.TrimSpace(string(out))
+	// Extract the last non-empty line as the IP address
+	// This allows the script to output debug information on earlier lines
+	lines := strings.Split(string(out), "\n")
+	var ip string
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			ip = line
+			break
+		}
+	}
+
 	return ip, nil
 }
 
