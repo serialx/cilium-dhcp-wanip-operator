@@ -88,6 +88,16 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			log.Info("router interface cleaned up successfully", "wanInterface", claim.Status.WanInterface)
 
+			// Remove IP from Cilium pool
+			if claim.Status.AssignedIP != "" {
+				log.Info("removing IP from Cilium pool", "pool", claim.Spec.PoolName, "ip", claim.Status.AssignedIP)
+				if err := r.removeIPFromPool(ctx, claim.Spec.PoolName, claim.Status.AssignedIP); err != nil {
+					log.Error(err, "failed to remove IP from pool", "pool", claim.Spec.PoolName)
+					return ctrl.Result{}, err
+				}
+				log.Info("IP removed from Cilium pool successfully", "pool", claim.Spec.PoolName, "ip", claim.Status.AssignedIP)
+			}
+
 			// Remove finalizer
 			controllerutil.RemoveFinalizer(&claim, finalizerName)
 			if err := r.Update(ctx, &claim); err != nil {
@@ -299,6 +309,74 @@ func (r *PublicIPClaimReconciler) ensureIPInPool(ctx context.Context, poolName, 
 	}
 
 	log.V(1).Info("updating pool", "pool", poolName, "totalBlocks", len(spec))
+	_, err = r.Dynamic.Resource(gvr).Update(ctx, pool, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update pool %s: %w", poolName, err)
+	}
+
+	return nil
+}
+
+func (r *PublicIPClaimReconciler) removeIPFromPool(ctx context.Context, poolName, ip string) error {
+	log := ctrllog.FromContext(ctx)
+
+	if ip == "" {
+		log.V(1).Info("no IP to remove from pool")
+		return nil
+	}
+
+	// Detect GVR (v2 or v2alpha1)
+	log.V(1).Info("detecting Cilium API version for removal", "pool", poolName)
+	gvr := gvrPoolV2
+	pool, err := r.Dynamic.Resource(gvr).Get(ctx, poolName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.V(1).Info("pool not found in cilium.io/v2, trying v2alpha1")
+			gvr = gvrPoolV2a
+			pool, err = r.Dynamic.Resource(gvr).Get(ctx, poolName, metav1.GetOptions{})
+		}
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("pool not found, skipping IP removal", "pool", poolName)
+				return nil // Pool doesn't exist, nothing to clean
+			}
+			return fmt.Errorf("failed to get pool %s: %w", poolName, err)
+		}
+	}
+	log.V(1).Info("using Cilium API version for removal", "group", gvr.Group, "version", gvr.Version)
+
+	// Get existing blocks
+	spec, found, _ := unstructured.NestedSlice(pool.Object, "spec", "blocks")
+	if !found || len(spec) == 0 {
+		log.V(1).Info("pool has no blocks, nothing to remove")
+		return nil
+	}
+
+	// Remove the matching CIDR block
+	cidr := fmt.Sprintf("%s/32", ip)
+	newSpec := []interface{}{}
+	removed := false
+	for _, b := range spec {
+		m := b.(map[string]interface{})
+		if m["cidr"] == cidr {
+			log.Info("found IP block to remove", "pool", poolName, "cidr", cidr)
+			removed = true
+			continue // Skip this block (remove it)
+		}
+		newSpec = append(newSpec, b)
+	}
+
+	if !removed {
+		log.Info("IP not found in pool, nothing to remove", "pool", poolName, "cidr", cidr)
+		return nil
+	}
+
+	// Update pool with new blocks list
+	if err := unstructured.SetNestedSlice(pool.Object, newSpec, "spec", "blocks"); err != nil {
+		return fmt.Errorf("failed to set blocks in pool: %w", err)
+	}
+
+	log.V(1).Info("updating pool after removal", "pool", poolName, "totalBlocks", len(newSpec))
 	_, err = r.Dynamic.Resource(gvr).Update(ctx, pool, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update pool %s: %w", poolName, err)
