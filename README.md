@@ -79,12 +79,25 @@ make install
 **4. Deploy operator**
 
 ```bash
-# Build and push (or use pre-built image)
 export IMG=<your-registry>/cilium-dhcp-wanip-operator:latest
+
+# Option A: Multi-arch build and push (recommended - supports AMD64, ARM64, s390x, ppc64le)
+make docker-buildx IMG=$IMG
+
+# Option B: Single-arch build (faster, builds for your host platform)
 make docker-build docker-push IMG=$IMG
 
 # Deploy to cluster
 make deploy IMG=$IMG
+```
+
+**Multi-arch build options:**
+
+```bash
+# Build for specific platforms only
+make docker-buildx IMG=$IMG PLATFORMS=linux/amd64,linux/arm64
+
+# Default platforms: linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 ```
 
 **5. Create a Cilium IP Pool**
@@ -106,6 +119,7 @@ spec:
     host: 192.168.1.1
     user: root
     sshSecretRef: router-ssh
+    command: /data/cilium-dhcp-wanip-operator/alloc_public_ip.sh
     wanParent: eth9  # Your router's WAN interface
 ```
 
@@ -189,10 +203,23 @@ See [SPEC.md](SPEC.md) for complete architecture documentation including:
 make run
 ```
 
-**Build:**
+**Build binary:**
 
 ```bash
 make build
+```
+
+**Build Docker images:**
+
+```bash
+# Single-arch (for your host platform)
+make docker-build IMG=<your-image>
+
+# Multi-arch (cross-platform)
+make docker-buildx IMG=<your-image>
+
+# Multi-arch with custom platforms
+make docker-buildx IMG=<your-image> PLATFORMS=linux/amd64,linux/arm64
 ```
 
 **Run tests:**
