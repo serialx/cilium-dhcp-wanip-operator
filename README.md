@@ -258,6 +258,56 @@ make test
 make manifests generate
 ```
 
+### Releasing New Versions
+
+When you're ready to release a new version:
+
+**1. Build and push the Docker image**
+
+The GitHub Actions workflow automatically builds and pushes images when you create a tag:
+
+```bash
+git tag -a v0.2.0 -m "Release v0.2.0 - Description of changes"
+git push origin v0.2.0
+```
+
+This will trigger the CI to build multi-platform images and push to `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0`
+
+**2. Generate the installer manifest**
+
+After the CI completes, update the installer manifest with the new image:
+
+```bash
+make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0
+```
+
+This updates `dist/install.yaml` with the new image tag.
+
+**3. Commit and push the installer**
+
+```bash
+git add dist/install.yaml config/manager/kustomization.yaml
+git commit -m "chore: update installer manifest for v0.2.0"
+git push origin main
+```
+
+**4. Create a GitHub Release**
+
+```bash
+gh release create v0.2.0 \
+  --title "v0.2.0" \
+  --notes "Release notes here" \
+  dist/install.yaml
+```
+
+Or create it manually in the GitHub UI and attach `dist/install.yaml`.
+
+**Users can then install the new version:**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
+```
+
 ## Uninstall
 
 **If installed via Quick Install (Option A):**
