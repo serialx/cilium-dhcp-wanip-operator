@@ -136,11 +136,11 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(res.Requeue).To(gomega.BeTrue())
+	g.Expect(res.RequeueAfter).To(gomega.BeNumerically(">", 0))
 
 	res, err = reconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(res.Requeue).To(gomega.BeFalse())
+	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
 
 	updated := &networkv1alpha1.PublicIPClaim{}
 	g.Expect(c.Get(ctx, req.NamespacedName, updated)).To(gomega.Succeed())
@@ -190,7 +190,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	res, err = deleteReconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(res.Requeue).To(gomega.BeFalse())
+	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
 
 	commands = sshServer.Commands()
 	g.Expect(commands).To(gomega.HaveLen(2))
@@ -289,16 +289,13 @@ func (s *mockSSHServer) serve() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				continue
-			}
 			return
 		}
 
 		s.wg.Add(1)
 		go func(c net.Conn) {
 			defer s.wg.Done()
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			s.handleConn(c)
 		}(conn)
 	}
@@ -309,7 +306,7 @@ func (s *mockSSHServer) handleConn(conn net.Conn) {
 	if err != nil {
 		return
 	}
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 
 	go ssh.DiscardRequests(reqs)
 
@@ -327,7 +324,7 @@ func (s *mockSSHServer) handleConn(conn net.Conn) {
 		s.wg.Add(1)
 		go func(ch ssh.Channel, in <-chan *ssh.Request) {
 			defer s.wg.Done()
-			defer ch.Close()
+			defer func() { _ = ch.Close() }()
 			for req := range in {
 				switch req.Type {
 				case "env", "pty-req":
