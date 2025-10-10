@@ -157,16 +157,42 @@ make fmt vet lint test
 
 After scaffolding, always run `make manifests generate` to update generated code.
 
-## Project Status
+## Development Workflow
 
-**Current State**: Scaffolded but API/controllers not yet implemented. The operator currently has no CRDs or controllers defined.
+**IMPORTANT: After any code changes, ALWAYS run the following checks before committing:**
 
-**Next Steps**:
-1. Create PublicIPClaim CRD using `kubebuilder create api`
-2. Implement controller logic from SPEC.md
-3. Add SSH client for router communication
-4. Implement finalizers for cleanup
-5. Add status tracking for WAN interfaces and MAC addresses
+### 1. Format and Vet
+```bash
+make fmt    # Auto-format code
+make vet    # Run go vet for issues
+```
+
+### 2. Run Linter (REQUIRED)
+```bash
+make lint   # Run golangci-lint - must pass with no errors
+```
+If linting fails, fix issues or use `make lint-fix` for auto-fixable problems.
+
+### 3. Run Tests (REQUIRED)
+```bash
+make test   # Run all unit tests - must pass
+```
+
+### 4. Complete Pre-Commit Checklist
+```bash
+# Run all checks in one command:
+make fmt vet lint test
+
+# If modifying API types, also run:
+make manifests generate
+```
+
+### 5. Verify Build
+```bash
+make build  # Ensure the operator builds successfully
+```
+
+**Never commit code that fails linting or tests. CI/CD pipelines depend on clean linting and passing tests.**
 
 ## Important Implementation Notes
 
