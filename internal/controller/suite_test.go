@@ -21,8 +21,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -80,7 +82,16 @@ var _ = BeforeSuite(func() {
 
 	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		// Only skip if envtest binaries are missing; fail on other errors
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "unable to find") ||
+			strings.Contains(errMsg, "not found") ||
+			strings.Contains(errMsg, "no such file") {
+			Skip(fmt.Sprintf("skipping: envtest binaries unavailable: %v", err))
+		}
+		Expect(err).NotTo(HaveOccurred())
+	}
 	Expect(cfg).NotTo(BeNil())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
@@ -91,8 +102,10 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	if testEnv != nil && cfg != nil {
+		err := testEnv.Stop()
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
