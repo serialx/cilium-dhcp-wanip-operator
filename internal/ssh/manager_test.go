@@ -144,11 +144,13 @@ func TestRegistryDifferentConfigs(t *testing.T) {
 func TestCommandHelpers(t *testing.T) {
 	runner := &fakeRunner{responses: map[string][]byte{
 		"cat /proc/uptime": []byte("100.00 0\n"),
-		"if [ -d '/sys/class/net/eth0' ]; then echo true; else echo false; fi":    []byte("true\n"),
-		"if pgrep -x udhcpc >/dev/null 2>&1; then echo true; else echo false; fi": []byte("false\n"),
-		"cat '/sys/class/net/eth0/address'":                                       []byte("aa:bb:cc:dd:ee:ff\n"),
-		"cat '/proc/sys/net/ipv4/conf/eth0/proxy_arp'":                            []byte("1\n"),
-		"ls /sys/class/net": []byte("eth0 lo\n"),
+		"if [ -d '/sys/class/net/eth0' ]; then echo true; else echo false; fi":                       []byte("true\n"),
+		"if pgrep -x udhcpc >/dev/null 2>&1; then echo true; else echo false; fi":                    []byte("false\n"),
+		"cat '/sys/class/net/eth0/address'":                                                          []byte("aa:bb:cc:dd:ee:ff\n"),
+		"ip -4 -o addr show dev 'eth0' scope global | awk 'NR==1 {split($4, a, \"/\"); print a[1]}'": []byte("192.0.2.10\n"),
+		"cat '/proc/sys/net/ipv4/conf/eth0/proxy_arp'":                                               []byte("1\n"),
+		"cat '/sys/class/net/eth0/operstate'":                                                        []byte("up\n"),
+		"ls /sys/class/net":                                                                          []byte("eth0 lo\n"),
 	}}
 	cfg := baseConfig()
 	cfg.Runner = runner
@@ -187,9 +189,25 @@ func TestCommandHelpers(t *testing.T) {
 		t.Fatalf("unexpected mac %s", mac)
 	}
 
+	ip, err := mgr.GetInterfaceIP(context.Background(), "eth0")
+	if err != nil {
+		t.Fatalf("GetInterfaceIP: %v", err)
+	}
+	if ip != "192.0.2.10" {
+		t.Fatalf("unexpected ip %s", ip)
+	}
+
 	proxyARP, err := mgr.IsProxyARPEnabled(context.Background(), "eth0")
 	if err != nil || !proxyARP {
 		t.Fatalf("IsProxyARPEnabled unexpected result: %v %v", proxyARP, err)
+	}
+
+	up, err := mgr.IsInterfaceUp(context.Background(), "eth0")
+	if err != nil {
+		t.Fatalf("IsInterfaceUp: %v", err)
+	}
+	if !up {
+		t.Fatalf("expected interface to be up")
 	}
 
 	ifaces, err := mgr.ListManagedInterfaces(context.Background())

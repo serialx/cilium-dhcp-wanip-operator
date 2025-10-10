@@ -78,6 +78,23 @@ func (m *SSHConnectionManager) GetInterfaceMAC(ctx context.Context, iface string
 	return strings.TrimSpace(string(out)), nil
 }
 
+// GetInterfaceIP returns the IPv4 address assigned to the interface, if any.
+func (m *SSHConnectionManager) GetInterfaceIP(ctx context.Context, iface string) (string, error) {
+	if err := validateInterfaceName(iface); err != nil {
+		return "", err
+	}
+	cmd := fmt.Sprintf("ip -4 -o addr show dev %s scope global | awk 'NR==1 {split($4, a, \"/\"); print a[1]}'", shellQuote(iface))
+	out, err := m.RunCommand(ctx, cmd)
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", errors.New("interface has no IPv4 address")
+	}
+	return ip, nil
+}
+
 // IsProxyARPEnabled checks if proxy ARP is enabled on the interface.
 func (m *SSHConnectionManager) IsProxyARPEnabled(ctx context.Context, iface string) (bool, error) {
 	if err := validateInterfaceName(iface); err != nil {
@@ -89,6 +106,19 @@ func (m *SSHConnectionManager) IsProxyARPEnabled(ctx context.Context, iface stri
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == "1", nil
+}
+
+// IsInterfaceUp reports whether the interface is in the "up" operational state.
+func (m *SSHConnectionManager) IsInterfaceUp(ctx context.Context, iface string) (bool, error) {
+	if err := validateInterfaceName(iface); err != nil {
+		return false, err
+	}
+	cmd := fmt.Sprintf("cat %s", shellQuote("/sys/class/net/"+iface+"/operstate"))
+	out, err := m.RunCommand(ctx, cmd)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) == "up", nil
 }
 
 // ListManagedInterfaces lists all network interfaces.
