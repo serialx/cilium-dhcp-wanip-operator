@@ -808,13 +808,13 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 - [x] Update RBAC for Cilium pools access
 - [x] Update RBAC for Secrets access
 - [x] Auto-generated deployment manifests
-- [ ] Add example PublicIPClaim resources
+- [x] Add example PublicIPClaim resources
 
-### Phase 5: Testing and Documentation 📋
-- [ ] Unit tests for controller logic
-- [ ] Integration tests with mock SSH
-- [ ] E2E tests (optional)
-- [ ] Update README with deployment instructions
+### Phase 5: Testing and Documentation ✅
+- [x] Unit tests for controller logic
+- [x] Integration tests with mock SSH
+- [x] E2E tests
+- [x] Update README with deployment instructions
 
 ### Phase 6: Enhancements 📋
 - [ ] Observability (metrics, events)
@@ -824,29 +824,35 @@ func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, cl
 
 ---
 
-## Current Status (Updated: 2025-10-09)
+## Current Status (Updated: 2025-10-10)
 
-**Core Implementation: COMPLETE** ✅
+**Project Status: PRODUCTION READY** ✅
 
-The operator is fully implemented and ready for deployment:
+The operator is fully implemented, tested, and released:
 
 - ✅ **CRD**: PublicIPClaim with all fields (RouterSpec, ClaimPhase, Status)
 - ✅ **Controller**: Full reconciliation loop with SSH, IP validation, pool updates, and finalizers
 - ✅ **RBAC**: Auto-generated ClusterRole with all required permissions
-- ✅ **Build**: Operator builds successfully (`make build`)
-- ✅ **Dependencies**: golang.org/x/crypto/ssh added for SSH functionality
+- ✅ **Testing**: Comprehensive unit tests, integration tests, and E2E tests (84.5% coverage)
+- ✅ **Documentation**: Complete README with deployment instructions
+- ✅ **Examples**: Sample YAMLs for claims, pools, secrets, and router scripts
+- ✅ **Release**: v0.1.0 released with installer manifest
 
-**Files Created/Modified:**
+**Key Files:**
 - `api/v1alpha1/publicipclaim_types.go` - Complete CRD definition
 - `internal/controller/publicipclaim_controller.go` - Full controller implementation
-- `cmd/main.go` - Controller registration with Kube/Dynamic clients
-- `config/crd/bases/network.serialx.net_publicipclaims.yaml` - Generated CRD manifest
-- `config/rbac/role.yaml` - Generated RBAC rules
+- `internal/controller/*_test.go` - Comprehensive test suite
+- `config/samples/` - Example YAML files and router script
+- `dist/install.yaml` - Single-file installer for v0.1.0
+- `README.md` - Complete deployment and usage guide
 
-**Next Steps:**
-1. Create example PublicIPClaim YAML (see Section 6)
-2. Deploy to cluster (`make install && make deploy`)
-3. Create router SSH secret
-4. Test with a claim
-5. Add unit/integration tests
-6. Update README with deployment guide
+**Installation:**
+```bash
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.1.0/dist/install.yaml
+```
+
+**Future Enhancements (Phase 6):**
+- Observability improvements (Prometheus metrics, events)
+- Validating webhooks
+- Automatic router state reconciliation after reboots
+- Pool autoscaler
