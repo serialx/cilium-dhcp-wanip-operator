@@ -181,9 +181,14 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		WithObjects(secret.DeepCopy(), deleted).
 		Build()
 
-	reconciler.Client = deleteClient
+	// Create new reconciler for deletion test to avoid mutating the original
+	deleteReconciler := &PublicIPClaimReconciler{
+		Client:  deleteClient,
+		Dynamic: dynClient,
+		Scheme:  scheme,
+	}
 
-	res, err = reconciler.Reconcile(ctx, req)
+	res, err = deleteReconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(res.Requeue).To(gomega.BeFalse())
 
@@ -203,12 +208,27 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 	g.Expect(blocks).To(gomega.BeEmpty())
 }
 
+// mockExecResponse defines a canned response for SSH command execution.
+// ExpectContains is an optional substring to match in the command.
+// If provided and the command doesn't match, an error response is returned.
 type mockExecResponse struct {
 	ExpectContains string
 	Output         string
 	ExitStatus     uint32
 }
 
+// mockSSHServer implements a minimal SSH server for testing PublicIPClaim reconciliation.
+//
+// How it works:
+// 1. Accepts SSH connections and authenticates using public key auth
+// 2. Accepts session channels and "exec" requests
+// 3. Matches incoming commands against pre-configured responses (FIFO order)
+// 4. Records all executed commands for later verification
+// 5. Uses sync.WaitGroup to ensure clean shutdown (all goroutines complete)
+//
+// Thread safety:
+// - mu protects commands and responses slices (accessed by multiple connections)
+// - wg tracks all active goroutines for proper cleanup on Close()
 type mockSSHServer struct {
 	listener  net.Listener
 	host      string

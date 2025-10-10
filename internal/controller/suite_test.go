@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,7 +80,14 @@ var _ = BeforeSuite(func() {
 	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
 	if err != nil {
-		Skip(fmt.Sprintf("skipping envtest start: %v", err))
+		// Only skip if envtest binaries are missing; fail on other errors
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "unable to find") ||
+			strings.Contains(errMsg, "not found") ||
+			strings.Contains(errMsg, "no such file") {
+			Skip(fmt.Sprintf("skipping: envtest binaries unavailable: %v", err))
+		}
+		Expect(err).NotTo(HaveOccurred())
 	}
 	Expect(cfg).NotTo(BeNil())
 
