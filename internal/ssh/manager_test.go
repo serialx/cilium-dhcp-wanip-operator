@@ -144,8 +144,16 @@ func (m *MockSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 
 	for req := range requests {
 		if req.Type == "exec" {
-			// Extract command from payload
+			// Extract command from payload with bounds checking to avoid panics on malformed data
+			if len(req.Payload) < 4 {
+				_ = req.Reply(false, nil)
+				continue
+			}
 			cmdLen := int(req.Payload[3])
+			if len(req.Payload) < 4+cmdLen {
+				_ = req.Reply(false, nil)
+				continue
+			}
 			cmdBytes := req.Payload[4 : 4+cmdLen]
 
 			m.mu.RLock()

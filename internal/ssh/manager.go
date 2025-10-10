@@ -109,7 +109,8 @@ func (m *SSHConnectionManager) connect() error {
 	m.conn = conn
 	m.connected = true
 
-	// Preserve lastUptime so the next keep-alive can detect reboots after reconnects
+	// Intentionally avoid resetting lastUptime here so the next keep-alive comparison can
+	// detect whether the router rebooted while we were disconnected.
 
 	klog.Infof("SSH connection established (router: %s)", m.config.Address)
 	return nil

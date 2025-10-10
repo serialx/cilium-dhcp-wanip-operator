@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -47,6 +48,7 @@ func (r *SSHManagerRegistry) GetManager(config RouterConfig) *SSHConnectionManag
 	r.mu.Lock()
 
 	key := normalizeRouterAddress(config.Address)
+	config.Address = key
 	if mgr, exists := r.managers[key]; exists {
 		r.mu.Unlock()
 		return mgr
@@ -62,7 +64,7 @@ func (r *SSHManagerRegistry) GetManager(config RouterConfig) *SSHConnectionManag
 	// Start connection WITHOUT holding the registry lock
 	// This prevents blocking other GetManager() calls during the connection timeout window
 	if err := mgr.Start(r.baseCtx); err != nil {
-		klog.Errorf("Failed to start SSH manager (router: %s): %v", config.Address, err)
+		klog.Errorf("Failed to start SSH manager (router: %s): %v", key, err)
 	}
 
 	return mgr
@@ -97,7 +99,7 @@ func (r *SSHManagerRegistry) CloseAll() error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("errors closing SSH managers: %v", errs)
+		return fmt.Errorf("errors closing SSH managers: %w", errors.Join(errs...))
 	}
 	return nil
 }
