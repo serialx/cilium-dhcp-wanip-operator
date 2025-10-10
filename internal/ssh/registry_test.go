@@ -13,7 +13,7 @@ func TestSSHManagerRegistry_GetManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	registry := NewSSHManagerRegistry(context.Background())
 
@@ -38,7 +38,7 @@ func TestSSHManagerRegistry_GetManager(t *testing.T) {
 	}
 
 	// Clean up
-	manager1.Close()
+	_ = manager1.Close()
 	registry.RemoveManager(config.Address)
 }
 
@@ -66,7 +66,7 @@ func TestSSHManagerRegistry_LookupManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	registry := NewSSHManagerRegistry(context.Background())
 
@@ -94,7 +94,7 @@ func TestSSHManagerRegistry_LookupManager(t *testing.T) {
 	}
 
 	// Clean up
-	createdManager.Close()
+	_ = createdManager.Close()
 	registry.RemoveManager(config.Address)
 }
 
@@ -103,7 +103,7 @@ func TestSSHManagerRegistry_RemoveManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	registry := NewSSHManagerRegistry(context.Background())
 
@@ -125,7 +125,7 @@ func TestSSHManagerRegistry_RemoveManager(t *testing.T) {
 	}
 
 	// Remove it
-	manager.Close()
+	_ = manager.Close()
 	registry.RemoveManager(config.Address)
 
 	// Verify it's gone
@@ -140,13 +140,13 @@ func TestSSHManagerRegistry_CloseAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server 1: %v", err)
 	}
-	defer server1.Close()
+	defer func() { _ = server1.Close() }()
 
 	server2, err := NewMockSSHServer()
 	if err != nil {
 		t.Fatalf("Failed to create mock server 2: %v", err)
 	}
-	defer server2.Close()
+	defer func() { _ = server2.Close() }()
 
 	registry := NewSSHManagerRegistry(context.Background())
 
@@ -201,7 +201,7 @@ func TestSSHManagerRegistry_DefaultRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Save original default registry
 	originalRegistry := GetDefaultRegistry()
@@ -230,7 +230,7 @@ func TestSSHManagerRegistry_DefaultRegistry(t *testing.T) {
 	}
 
 	// Clean up
-	manager.Close()
+	_ = manager.Close()
 	RemoveManager(config.Address)
 
 	// Verify removal

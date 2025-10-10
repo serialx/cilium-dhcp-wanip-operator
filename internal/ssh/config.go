@@ -16,9 +16,9 @@ const (
 
 // RouterConfig contains router connection details
 type RouterConfig struct {
-	Address         string               // Router SSH address (e.g., "192.168.1.1:22")
-	Username        string               // SSH username
-	AuthMethod      ssh.AuthMethod       // Key-based or password auth
-	HostKeyCallback ssh.HostKeyCallback  // Host key verification (nil = insecure)
-	Timeout         time.Duration        // Connection timeout (default: 30s)
+	Address         string              // Router SSH address (e.g., "192.168.1.1:22")
+	Username        string              // SSH username
+	AuthMethod      ssh.AuthMethod      // Key-based or password auth
+	HostKeyCallback ssh.HostKeyCallback // Host key verification (nil = insecure)
+	Timeout         time.Duration       // Connection timeout (default: 30s)
 }

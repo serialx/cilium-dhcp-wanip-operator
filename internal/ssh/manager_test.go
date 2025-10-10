@@ -108,19 +108,23 @@ func (m *MockSSHServer) serve() {
 }
 
 func (m *MockSSHServer) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, m.config)
 	if err != nil {
 		return
 	}
-	defer sshConn.Close()
+	defer func() {
+		_ = sshConn.Close()
+	}()
 
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
 
@@ -134,28 +138,30 @@ func (m *MockSSHServer) handleConnection(conn net.Conn) {
 }
 
 func (m *MockSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
-	defer channel.Close()
+	defer func() {
+		_ = channel.Close()
+	}()
 
 	for req := range requests {
 		if req.Type == "exec" {
 			// Extract command from payload
 			cmdLen := int(req.Payload[3])
-			cmd := string(req.Payload[4 : 4+cmdLen])
+			cmdBytes := req.Payload[4 : 4+cmdLen]
 
 			m.mu.RLock()
-			response, exists := m.commands[cmd]
+			response, exists := m.commands[string(cmdBytes)]
 			m.mu.RUnlock()
 
 			if exists {
-				channel.Write([]byte(response + "\n"))
-				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+				_, _ = channel.Write([]byte(response + "\n"))
+				_, _ = channel.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 			} else {
-				channel.SendRequest("exit-status", false, []byte{0, 0, 0, 1})
+				_, _ = channel.SendRequest("exit-status", false, []byte{0, 0, 0, 1})
 			}
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			return
 		}
-		req.Reply(false, nil)
+		_ = req.Reply(false, nil)
 	}
 }
 
@@ -164,7 +170,7 @@ func TestSSHConnectionManager_Connect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	config := RouterConfig{
 		Address:         server.Address(),
@@ -182,7 +188,7 @@ func TestSSHConnectionManager_Connect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	if !manager.IsConnected() {
 		t.Error("Manager should be connected")
@@ -198,7 +204,7 @@ func TestSSHConnectionManager_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	config := RouterConfig{
 		Address:         server.Address(),
@@ -216,7 +222,7 @@ func TestSSHConnectionManager_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test command execution
 	output, err := manager.Execute("cat /proc/uptime")
@@ -234,7 +240,7 @@ func TestSSHConnectionManager_RebootDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	config := RouterConfig{
 		Address:         server.Address(),
@@ -264,7 +270,7 @@ func TestSSHConnectionManager_RebootDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Manually trigger first uptime check to establish baseline
 	err = manager.checkConnection()
@@ -306,7 +312,7 @@ func TestSSHConnectionManager_HandlerManagement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	config := RouterConfig{
 		Address:         server.Address(),
@@ -378,7 +384,7 @@ func TestSSHConnectionManager_CommandWrappers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up command responses
 	server.SetCommandResponse("ip link show test-interface", "2: test-interface: <BROADCAST,MULTICAST,UP,LOWER_UP>")
@@ -404,7 +410,7 @@ func TestSSHConnectionManager_CommandWrappers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test GetRouterUptime
 	uptime, err := manager.GetRouterUptime()

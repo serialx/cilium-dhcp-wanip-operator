@@ -13,7 +13,7 @@ func TestCommands_InterfaceExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up responses
 	server.SetCommandResponse("ip link show existing-interface", "2: existing-interface: <BROADCAST,MULTICAST,UP,LOWER_UP>")
@@ -34,7 +34,7 @@ func TestCommands_InterfaceExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test existing interface
 	exists, err := manager.InterfaceExists("existing-interface")
@@ -60,7 +60,7 @@ func TestCommands_IsUdhcpcRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up responses
 	server.SetCommandResponse("ps aux | grep '[u]dhcpc.*running-interface'", "root  1234  0.0  0.0  udhcpc -i running-interface")
@@ -81,7 +81,7 @@ func TestCommands_IsUdhcpcRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test running udhcpc
 	running, err := manager.IsUdhcpcRunning("running-interface")
@@ -107,7 +107,7 @@ func TestCommands_GetInterfaceMAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up responses
 	server.SetCommandResponse("ip link show test-interface | grep 'link/ether' | awk '{print $2}'", "02:aa:bb:cc:dd:ee")
@@ -128,7 +128,7 @@ func TestCommands_GetInterfaceMAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	mac, err := manager.GetInterfaceMAC("test-interface")
 	if err != nil {
@@ -146,7 +146,7 @@ func TestCommands_IsProxyARPEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up responses
 	server.SetCommandResponse("cat /proc/sys/net/ipv4/conf/enabled-interface/proxy_arp", "1")
@@ -168,7 +168,7 @@ func TestCommands_IsProxyARPEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test enabled proxy ARP
 	enabled, err := manager.IsProxyARPEnabled("enabled-interface")
@@ -194,7 +194,7 @@ func TestCommands_ListManagedInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up response with multiple interfaces
 	response := "wan0.dhcp1\nwan0.dhcp2\neth8.dhcp1"
@@ -216,7 +216,7 @@ func TestCommands_ListManagedInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	interfaces, err := manager.ListManagedInterfaces()
 	if err != nil {
@@ -240,7 +240,7 @@ func TestCommands_GetInterfaceIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up response
 	server.SetCommandResponse("ip addr show test-interface | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1", "192.168.1.100")
@@ -261,7 +261,7 @@ func TestCommands_GetInterfaceIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	ip, err := manager.GetInterfaceIP("test-interface")
 	if err != nil {
@@ -279,7 +279,7 @@ func TestCommands_IsInterfaceUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create mock server: %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	// Set up responses (up interface will succeed, down interface will fail)
 	server.SetCommandResponse("ip link show up-interface | grep -q 'state UP'", "")
@@ -300,7 +300,7 @@ func TestCommands_IsInterfaceUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start manager: %v", err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	// Test interface that is up
 	up, err := manager.IsInterfaceUp("up-interface")

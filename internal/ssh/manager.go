@@ -17,9 +17,9 @@ import (
 
 // SSHConnectionManager manages a single SSH connection to a router
 type SSHConnectionManager struct {
-	config       RouterConfig
-	conn         *ssh.Client
-	mu           sync.RWMutex
+	config RouterConfig
+	conn   *ssh.Client
+	mu     sync.RWMutex
 
 	// State
 	connected    bool
@@ -28,9 +28,9 @@ type SSHConnectionManager struct {
 	uptimeReady  bool    // Indicates lastUptime contains a baseline measurement
 
 	// Lifecycle
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	// Event handlers (map key: handler ID like "namespace/name")
 	handlers   map[string]func(ReconnectionReason)
@@ -303,7 +303,9 @@ func (m *SSHConnectionManager) ExecuteWithTimeout(cmd string, timeout time.Durat
 		}
 		return "", fmt.Errorf("failed to create SSH session: %w", err)
 	}
-	defer session.Close()
+	defer func() {
+		_ = session.Close()
+	}()
 
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -331,8 +333,8 @@ func (m *SSHConnectionManager) ExecuteWithTimeout(cmd string, timeout time.Durat
 		return string(res.output), nil
 	case <-ctx.Done():
 		// Try to signal the session to stop
-		session.Signal(ssh.SIGKILL)
-		session.Close()
+		_ = session.Signal(ssh.SIGKILL)
+		_ = session.Close()
 		return "", fmt.Errorf("command timeout after %v: %s", timeout, cmd)
 	}
 }
@@ -345,11 +347,7 @@ func isSessionFatal(err error) bool {
 	}
 
 	var netErr *net.OpError
-	if errors.As(err, &netErr) {
-		return true
-	}
-
-	return false
+	return errors.As(err, &netErr)
 }
 
 // RegisterHandler registers a handler for connection events (idempotent)
