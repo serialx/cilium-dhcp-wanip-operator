@@ -93,7 +93,9 @@ func (sshCommandRunner) Run(ctx context.Context, client *ssh.Client, command str
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
+	defer func() {
+		_ = session.Close()
+	}()
 
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
@@ -514,7 +516,6 @@ func (m *SSHConnectionManager) notifyHandlers(event Event) {
 	m.handlerMu.RUnlock()
 
 	for _, handler := range handlers {
-		handler := handler
 		go handler(event)
 	}
 }
