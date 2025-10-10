@@ -91,7 +91,7 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	if testEnv != nil && testEnv.ControlPlane != nil {
+	if testEnv != nil && cfg != nil {
 		err := testEnv.Stop()
 		Expect(err).NotTo(HaveOccurred())
 	}
