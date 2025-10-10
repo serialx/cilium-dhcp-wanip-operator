@@ -21,6 +21,13 @@ func validateInterfaceName(name string) error {
 	return nil
 }
 
+func shellQuote(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+}
+
 // GetRouterUptime returns the router uptime as a duration.
 func (m *SSHConnectionManager) GetRouterUptime(ctx context.Context) (time.Duration, error) {
 	output, err := m.RunCommand(ctx, "cat /proc/uptime")
@@ -39,7 +46,8 @@ func (m *SSHConnectionManager) InterfaceExists(ctx context.Context, iface string
 	if err := validateInterfaceName(iface); err != nil {
 		return false, err
 	}
-	cmd := fmt.Sprintf("if [ -d /sys/class/net/%s ]; then echo true; else echo false; fi", iface)
+	path := "/sys/class/net/" + iface
+	cmd := fmt.Sprintf("if [ -d %s ]; then echo true; else echo false; fi", shellQuote(path))
 	out, err := m.RunCommand(ctx, cmd)
 	if err != nil {
 		return false, err
@@ -62,7 +70,7 @@ func (m *SSHConnectionManager) GetInterfaceMAC(ctx context.Context, iface string
 	if err := validateInterfaceName(iface); err != nil {
 		return "", err
 	}
-	cmd := fmt.Sprintf("cat /sys/class/net/%s/address", iface)
+	cmd := fmt.Sprintf("cat %s", shellQuote("/sys/class/net/"+iface+"/address"))
 	out, err := m.RunCommand(ctx, cmd)
 	if err != nil {
 		return "", err
@@ -75,7 +83,7 @@ func (m *SSHConnectionManager) IsProxyARPEnabled(ctx context.Context, iface stri
 	if err := validateInterfaceName(iface); err != nil {
 		return false, err
 	}
-	cmd := fmt.Sprintf("cat /proc/sys/net/ipv4/conf/%s/proxy_arp", iface)
+	cmd := fmt.Sprintf("cat %s", shellQuote("/proc/sys/net/ipv4/conf/"+iface+"/proxy_arp"))
 	out, err := m.RunCommand(ctx, cmd)
 	if err != nil {
 		return false, err

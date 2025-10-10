@@ -118,13 +118,36 @@ func TestRegistryGetOrCreate(t *testing.T) {
 	}
 }
 
+func TestRegistryDifferentConfigs(t *testing.T) {
+	registry := NewRegistry()
+
+	cfg1 := baseConfig()
+	cfg2 := baseConfig()
+	cfg2.Username = "other"
+
+	mgr1, err := registry.GetOrCreate(cfg1)
+	if err != nil {
+		t.Fatalf("get manager cfg1: %v", err)
+	}
+	mgr2, err := registry.GetOrCreate(cfg2)
+	if err != nil {
+		t.Fatalf("get manager cfg2: %v", err)
+	}
+	if mgr1 == mgr2 {
+		t.Fatalf("expected distinct managers for different configs")
+	}
+	if registry.Len() != 2 {
+		t.Fatalf("expected registry length 2, got %d", registry.Len())
+	}
+}
+
 func TestCommandHelpers(t *testing.T) {
 	runner := &fakeRunner{responses: map[string][]byte{
 		"cat /proc/uptime": []byte("100.00 0\n"),
-		"if [ -d /sys/class/net/eth0 ]; then echo true; else echo false; fi":      []byte("true\n"),
+		"if [ -d '/sys/class/net/eth0' ]; then echo true; else echo false; fi":    []byte("true\n"),
 		"if pgrep -x udhcpc >/dev/null 2>&1; then echo true; else echo false; fi": []byte("false\n"),
-		"cat /sys/class/net/eth0/address":                                         []byte("aa:bb:cc:dd:ee:ff\n"),
-		"cat /proc/sys/net/ipv4/conf/eth0/proxy_arp":                              []byte("1\n"),
+		"cat '/sys/class/net/eth0/address'":                                       []byte("aa:bb:cc:dd:ee:ff\n"),
+		"cat '/proc/sys/net/ipv4/conf/eth0/proxy_arp'":                            []byte("1\n"),
 		"ls /sys/class/net": []byte("eth0 lo\n"),
 	}}
 	cfg := baseConfig()
