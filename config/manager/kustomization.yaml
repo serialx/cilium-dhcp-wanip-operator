@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: ghcr.io/serialx/cilium-dhcp-wanip-operator
-  newTag: v0.1.0
+  newTag: latest

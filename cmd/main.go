@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -33,12 +34,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
 	"serialx.net/cilium-dhcp-wanip-operator/internal/controller"
+	"serialx.net/cilium-dhcp-wanip-operator/internal/ssh"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -180,11 +183,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create SSH manager registry for connection pooling
+	sshRegistry := ssh.NewRegistry()
+	setupLog.Info("SSH manager registry created")
+
+	// Register cleanup on shutdown
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		setupLog.Info("shutting down SSH manager registry")
+		sshRegistry.CloseAll()
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add SSH registry cleanup")
+		os.Exit(1)
+	}
+
 	if err := (&controller.PublicIPClaimReconciler{
-		Client:  mgr.GetClient(),
-		Kube:    kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-		Dynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
-		Scheme:  mgr.GetScheme(),
+		Client:      mgr.GetClient(),
+		Kube:        kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+		Dynamic:     dynamic.NewForConfigOrDie(mgr.GetConfig()),
+		Scheme:      mgr.GetScheme(),
+		SSHRegistry: sshRegistry,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PublicIPClaim")
 		os.Exit(1)
