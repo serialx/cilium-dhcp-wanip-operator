@@ -58,13 +58,13 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 Deploy the operator directly from the release manifest:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.1.0/dist/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
 ```
 
 This will:
 - Create the `cilium-dhcp-wanip-operator-system` namespace
 - Install the `PublicIPClaim` CRD
-- Deploy the operator controller with image `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.1.0`
+- Deploy the operator controller with image `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0`
 - Set up necessary RBAC permissions
 
 Verify the installation:
@@ -171,6 +171,10 @@ kubectl get publicipclaims
 - ✅ **MAC Generation**: Auto-generates unique MAC addresses for each claim
 - ✅ **API Version Detection**: Supports both Cilium v2 and v2alpha1 APIs
 - ✅ **Status Tracking**: Full status reporting with phase, IP, interface, and MAC
+- ✅ **Automatic Reboot Recovery**: Detects router reboots and automatically restores configuration (~40s)
+- ✅ **SSH Connection Pooling**: Efficient connection management with automatic reconnection
+- ✅ **Periodic Verification**: Validates router state every 60 minutes to detect configuration drift
+- ✅ **Event-Driven Reconciliation**: Reacts immediately to connection drops and router state changes
 
 ## Examples
 
@@ -305,7 +309,7 @@ Or create it manually in the GitHub UI and attach `dist/install.yaml`.
 **Users can then install the new version:**
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.0/dist/install.yaml
 ```
 
 ## Uninstall
@@ -317,7 +321,7 @@ kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-ope
 kubectl delete publicipclaims --all
 
 # Remove the operator
-kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.1.0/dist/install.yaml
+kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
 ```
 
 **If installed from source (Option B):**
@@ -352,22 +356,49 @@ kubectl describe publicipclaim <name>
 - DHCP fails → Verify `wanParent` interface name
 - IP not added to pool → Check RBAC permissions for Cilium resources
 
-## Known Limitations
+## Resilience & Recovery
 
-### Router Reboot Persistence
+### Automatic Reboot Recovery (v0.2.0+)
 
-**Current Behavior**: When the router reboots, macvlan interfaces and DHCP daemons created by this operator **do NOT survive** the reboot. After a router restart, the allocated public IPs and their associated network configuration are lost.
+The operator automatically detects and recovers from router reboots with **no manual intervention required**:
 
-**Impact**:
-- Kubernetes `PublicIPClaim` resources will still exist and show status as `Ready`
-- However, the actual network configuration on the router is gone
-- Services using the allocated IPs will become unreachable until the configuration is restored
+**How It Works**:
+- **SSH Connection Monitoring**: Maintains persistent SSH connections to routers with keep-alive checks every 30 seconds
+- **Reboot Detection**: Detects router reboots by monitoring uptime changes (~40 second worst-case detection time)
+- **Automatic Restoration**: Immediately reapplies all configuration (interfaces, DHCP clients, proxy ARP) when reboot detected
+- **Periodic Verification**: Validates router state every 60 minutes as a safety net to catch any configuration drift
+- **Connection Pooling**: Multiple claims share a single SSH connection per router for efficiency
 
-**Workaround**: Manually re-apply (delete and recreate) the `PublicIPClaim` resources after a router reboot to restore the configuration.
+**What This Means**:
+- ✅ Router reboots are automatically handled
+- ✅ Services recover within ~40 seconds of router reboot
+- ✅ No manual intervention needed
+- ✅ Configuration drift is automatically corrected
+- ✅ Connection drops trigger immediate reconciliation
 
-**Future Improvement**: This limitation is tracked for future enhancement. Potential solutions include:
-- Implementing automatic reconciliation to detect and restore lost router configurations
-- Health checks to detect when router configuration is out of sync with K8s state
+**Observability**:
+```bash
+# Check claim status to see last verification time
+kubectl get publicipclaim my-claim -o yaml
+
+# Status fields show:
+# - lastVerified: timestamp of last successful verification
+# - routerUptime: current router uptime in seconds
+# - configurationVerified: whether config has been verified
+# - lastReconciliationReason: why last reconciliation occurred
+#   (router_reboot, interface_missing, periodic, etc.)
+```
+
+**Events**:
+The operator emits Kubernetes events for key actions:
+```bash
+kubectl describe publicipclaim my-claim
+
+# Events you may see:
+# - RouterRebooted: Router reboot detected, reapplying configuration
+# - ConfigurationApplied: Configuration applied successfully
+# - ConfigurationDrift: Interface missing, reapplying configuration
+```
 
 ## Contributing
 
