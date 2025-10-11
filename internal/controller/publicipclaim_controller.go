@@ -39,6 +39,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
+	sshpkg "serialx.net/cilium-dhcp-wanip-operator/internal/ssh"
 )
 
 // GVRs for Cilium pool (try v2 first, then v2alpha1)
@@ -55,6 +56,10 @@ type PublicIPClaimReconciler struct {
 	Kube    *kubernetes.Clientset
 	Dynamic dynamic.Interface
 	Scheme  *runtime.Scheme
+
+	// SSH connection management (Phase 1: connection pooling)
+	// Phase 2 will add: sshHandlerMu, sshHandlers for event handler tracking
+	SSHRegistry *sshpkg.SSHManagerRegistry
 
 	runRouterScriptFn        func(context.Context, *networkv1alpha1.PublicIPClaim, string, string) (string, error)
 	ensureIPInPoolFn         func(context.Context, string, string) error
@@ -245,61 +250,38 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 func (r *PublicIPClaimReconciler) defaultRunRouterScript(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, wanIf, macAddr string) (string, error) {
 	log := ctrllog.FromContext(ctx)
 
-	// SSH secret
-	log.V(1).Info("retrieving SSH secret", "secret", claim.Spec.Router.SSHSecretRef, "namespace", "kube-system")
-	sec := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
-		return "", fmt.Errorf("failed to get SSH secret: %w", err)
-	}
-	key := sec.Data["id_rsa"]
-	if len(key) == 0 {
-		return "", fmt.Errorf("ssh private key not found in secret %s/id_rsa", claim.Spec.Router.SSHSecretRef)
-	}
-	log.V(1).Info("SSH secret retrieved successfully")
-
-	// Dial SSH
-	signer, err := ssh.ParsePrivateKey(key)
+	// Get SSH manager for this router (connection pooling)
+	log.V(1).Info("getting SSH manager", "router", claim.Spec.Router.Host)
+	mgr, err := r.getSSHManager(ctx, claim)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse SSH private key: %w", err)
+		return "", err
 	}
 
-	conf := &ssh.ClientConfig{
-		User:            claim.Spec.Router.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         15 * time.Second,
-	}
-	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
-
-	log.V(1).Info("establishing SSH connection", "address", addr)
-	conn, err := ssh.Dial("tcp", addr, conf)
-	if err != nil {
-		return "", fmt.Errorf("failed to connect via SSH to %s: %w", addr, err)
-	}
-	defer func() { _ = conn.Close() }()
-	log.V(1).Info("SSH connection established")
-
-	sess, err := conn.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("failed to create SSH session: %w", err)
-	}
-	defer func() { _ = sess.Close() }()
-
-	// Set environment variables for the script
-	// Using export ensures variables work regardless of shell
+	// Build command with environment variables
 	cmd := fmt.Sprintf("export WAN_PARENT=%q WAN_IF=%q WAN_MAC=%q && %s",
 		claim.Spec.Router.WanParent, wanIf, macAddr, claim.Spec.Router.Command)
 
-	log.Info("executing router script", "script", claim.Spec.Router.Command, "wanParent", claim.Spec.Router.WanParent, "wanInterface", wanIf, "macAddress", macAddr)
-	out, err := sess.CombinedOutput(cmd)
+	log.Info("executing router script via SSH manager",
+		"router", claim.Spec.Router.Host,
+		"script", claim.Spec.Router.Command,
+		"wanParent", claim.Spec.Router.WanParent,
+		"wanInterface", wanIf,
+		"macAddress", macAddr)
+
+	// Execute command via SSH manager with timeout
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	output, err := mgr.RunCommand(cmdCtx, cmd)
 	if err != nil {
-		return "", fmt.Errorf("%v: %s", err, string(out))
+		return "", fmt.Errorf("router script failed: %w", err)
 	}
-	log.V(1).Info("script output received", "lines", len(strings.Split(string(out), "\n")))
+
+	log.V(1).Info("script output received", "lines", len(strings.Split(string(output), "\n")))
 
 	// Extract the last non-empty line as the IP address
 	// This allows the script to output debug information on earlier lines
-	lines := strings.Split(string(out), "\n")
+	lines := strings.Split(string(output), "\n")
 	var ip string
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -313,7 +295,7 @@ func (r *PublicIPClaimReconciler) defaultRunRouterScript(ctx context.Context, cl
 		return "", fmt.Errorf("router script produced no output")
 	}
 
-	log.V(1).Info("extracted IP from script output", "ip", ip)
+	log.Info("router script completed successfully", "ip", ip)
 	return ip, nil
 }
 
@@ -494,6 +476,59 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alph
 	return ctrl.Result{}, err
 }
 
+// getSSHManager retrieves or creates an SSH manager for the claim's router.
+// Phase 1: Returns manager without event handler registration (event handlers come in Phase 2).
+func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) (*sshpkg.SSHConnectionManager, error) {
+	log := ctrllog.FromContext(ctx)
+
+	// Get SSH credentials from secret
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+		return nil, fmt.Errorf("failed to get SSH secret: %w", err)
+	}
+
+	key := sec.Data["id_rsa"]
+	if len(key) == 0 {
+		return nil, fmt.Errorf("ssh private key not found in secret %s/id_rsa", claim.Spec.Router.SSHSecretRef)
+	}
+
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SSH private key: %w", err)
+	}
+
+	// Build SSH manager config
+	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
+	config := sshpkg.RouterConfig{
+		Address:           addr,
+		Username:          claim.Spec.Router.User,
+		AuthMethod:        ssh.PublicKeys(signer),
+		HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
+		Timeout:           30 * time.Second,
+		KeepAliveInterval: 30 * time.Second,
+		KeepAliveCommand:  "cat /proc/uptime",
+	}
+
+	// Get or create manager from registry
+	mgr, err := r.SSHRegistry.GetOrCreate(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSH manager: %w", err)
+	}
+
+	// Start manager if not already started
+	// The manager handles "already started" gracefully by returning an error we can ignore
+	if !mgr.IsConnected() && !mgr.IsReconnecting() {
+		if err := mgr.Start(ctx); err != nil {
+			// Manager starts in background, log but continue
+			log.V(1).Info("SSH manager starting in background", "router", addr, "error", err.Error())
+		} else {
+			log.Info("SSH manager started", "router", addr)
+		}
+	}
+
+	return mgr, nil
+}
+
 func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) error {
 	if r.cleanupRouterInterfaceFn != nil {
 		return r.cleanupRouterInterfaceFn(ctx, claim)
@@ -506,79 +541,64 @@ func (r *PublicIPClaimReconciler) defaultCleanupRouterInterface(ctx context.Cont
 
 	if claim.Status.WanInterface == "" {
 		log.V(1).Info("no WAN interface to clean up, skipping")
-		return nil // Nothing to clean up
-	}
-
-	log.V(1).Info("retrieving SSH secret for cleanup", "secret", claim.Spec.Router.SSHSecretRef)
-	// SSH secret
-	sec := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
-		if client.IgnoreNotFound(err) != nil {
-			log.Error(err, "failed to get SSH secret for cleanup")
-		} else {
-			log.Info("SSH secret not found, skipping cleanup (may have been deleted)")
-		}
-		return client.IgnoreNotFound(err) // Secret might be deleted already
-	}
-	key := sec.Data["id_rsa"]
-	if len(key) == 0 {
-		log.Info("SSH key not found in secret, skipping cleanup")
 		return nil
 	}
 
-	signer, err := ssh.ParsePrivateKey(key)
+	// Try to get SSH manager - it might not exist if router was never reached
+	mgr, err := r.getSSHManager(ctx, claim)
 	if err != nil {
-		return fmt.Errorf("failed to parse SSH key for cleanup: %w", err)
+		log.Info("cannot get SSH manager for cleanup, skipping", "error", err.Error())
+		return nil
 	}
 
-	conf := &ssh.ClientConfig{
-		User:            claim.Spec.Router.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         15 * time.Second,
-	}
-	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
+	// Check if interface exists before cleanup (using command helper)
+	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
-	log.V(1).Info("connecting to router for cleanup", "address", addr)
-	conn, err := ssh.Dial("tcp", addr, conf)
+	exists, err := mgr.InterfaceExists(cleanupCtx, claim.Status.WanInterface)
 	if err != nil {
-		return fmt.Errorf("failed to connect to router for cleanup: %w", err)
+		log.Error(err, "failed to check interface existence", "interface", claim.Status.WanInterface)
+	} else if !exists {
+		log.Info("interface does not exist, skipping cleanup", "interface", claim.Status.WanInterface)
+		goto checkManagerLifecycle
 	}
-	defer func() { _ = conn.Close() }()
 
-	sess, err := conn.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create SSH session for cleanup: %w", err)
+	log.Info("cleaning up router interface", "interface", claim.Status.WanInterface)
+
+	// Execute cleanup commands via SSH manager
+	{
+		// Kill udhcpc daemon, remove proxy ARP, and delete the interface
+		cmd := fmt.Sprintf(`
+			WAN_IF="%s"
+
+			# Kill DHCP client daemon
+			PID_FILE="/var/run/udhcpc.$WAN_IF.pid"
+			if [ -f "$PID_FILE" ]; then
+				kill $(cat "$PID_FILE") 2>/dev/null || true
+				rm -f "$PID_FILE"
+			fi
+
+			# Remove proxy ARP entries
+			ip neigh show proxy dev "$WAN_IF" 2>/dev/null | awk '{print $1}' | while read -r ip; do
+				ip neigh del proxy "$ip" dev "$WAN_IF" 2>/dev/null || true
+			done
+
+			# Delete the interface
+			ip link del "$WAN_IF" 2>/dev/null || true
+		`, claim.Status.WanInterface)
+
+		if _, err := mgr.RunCommand(cleanupCtx, cmd); err != nil {
+			log.Error(err, "cleanup commands failed")
+			// Continue anyway - best effort cleanup
+		} else {
+			log.Info("router interface cleaned up successfully", "interface", claim.Status.WanInterface)
+		}
 	}
-	defer func() { _ = sess.Close() }()
 
-	// Kill udhcpc daemon, remove proxy ARP, and delete the interface
-	cmd := fmt.Sprintf(`
-		WAN_IF="%s"
-
-		# Kill DHCP client daemon
-		PID_FILE="/var/run/udhcpc.$WAN_IF.pid"
-		if [ -f "$PID_FILE" ]; then
-			kill $(cat "$PID_FILE") 2>/dev/null || true
-			rm -f "$PID_FILE"
-		fi
-
-		# Remove proxy ARP entries
-		ip neigh show proxy dev "$WAN_IF" 2>/dev/null | awk '{print $1}' | while read -r ip; do
-			ip neigh del proxy "$ip" dev "$WAN_IF" 2>/dev/null || true
-		done
-
-		# Delete the interface
-		ip link del "$WAN_IF" 2>/dev/null || true
-	`, claim.Status.WanInterface)
-
-	log.Info("executing cleanup commands on router", "wanInterface", claim.Status.WanInterface)
-	out, err := sess.CombinedOutput(cmd)
-	if err != nil {
-		log.Error(err, "cleanup script failed", "output", string(out))
-		return fmt.Errorf("failed to execute cleanup: %w", err)
-	}
-	log.V(1).Info("cleanup commands executed successfully")
+checkManagerLifecycle:
+	// Phase 1: No event handlers yet, so we don't manage lifecycle based on handler count
+	// In Phase 2, we'll add handler tracking and close managers when unused
+	log.V(1).Info("cleanup complete", "interface", claim.Status.WanInterface)
 
 	return nil
 }

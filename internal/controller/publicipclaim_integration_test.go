@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
+	sshpkg "serialx.net/cilium-dhcp-wanip-operator/internal/ssh"
 )
 
 func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
@@ -63,6 +64,11 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 203.0.113.77
 `,
 			ExitStatus: 0,
+		},
+		{
+			ExpectContains: "/sys/class/net/",
+			Output:         "true\n",
+			ExitStatus:     0,
 		},
 		{
 			ExpectContains: "kill $(cat \"$PID_FILE\")",
@@ -107,9 +113,10 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		Build()
 
 	reconciler := &PublicIPClaimReconciler{
-		Client:  c,
-		Dynamic: dynClient,
-		Scheme:  scheme,
+		Client:      c,
+		Dynamic:     dynClient,
+		Scheme:      scheme,
+		SSHRegistry: sshpkg.NewRegistry(),
 	}
 
 	claim := &networkv1alpha1.PublicIPClaim{
@@ -183,9 +190,10 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	// Create new reconciler for deletion test to avoid mutating the original
 	deleteReconciler := &PublicIPClaimReconciler{
-		Client:  deleteClient,
-		Dynamic: dynClient,
-		Scheme:  scheme,
+		Client:      deleteClient,
+		Dynamic:     dynClient,
+		Scheme:      scheme,
+		SSHRegistry: sshpkg.NewRegistry(),
 	}
 
 	res, err = deleteReconciler.Reconcile(ctx, req)
@@ -193,8 +201,9 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
 
 	commands = sshServer.Commands()
-	g.Expect(commands).To(gomega.HaveLen(2))
-	g.Expect(commands[1]).To(gomega.ContainSubstring("kill $(cat \"$PID_FILE\")"))
+	g.Expect(commands).To(gomega.HaveLen(3))
+	g.Expect(commands[1]).To(gomega.ContainSubstring("/sys/class/net/"))
+	g.Expect(commands[2]).To(gomega.ContainSubstring("kill $(cat \"$PID_FILE\")"))
 
 	poolObj, err = dynClient.Resource(schema.GroupVersionResource{
 		Group:    "cilium.io",
