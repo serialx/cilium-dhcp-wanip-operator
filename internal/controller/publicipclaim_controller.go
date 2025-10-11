@@ -226,6 +226,15 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			claim.Status.ConfigurationVerified = false
 			claim.Status.RouterUptime = 0 // Reset uptime baseline to prevent false reboot detection
 
+			// Update Ready condition to False (configuration no longer verified)
+			meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               networkv1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "ConfigurationDrift",
+				Message:            fmt.Sprintf("Configuration drift detected: %s", err.Error()),
+				ObservedGeneration: claim.Generation,
+			})
+
 			// Update condition to indicate drift/recovery
 			meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
 				Type:               networkv1alpha1.ConditionRecovering,
