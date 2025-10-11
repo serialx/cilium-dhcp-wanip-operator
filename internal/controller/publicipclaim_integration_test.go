@@ -119,6 +119,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		SSHRegistry:       sshpkg.NewRegistry(),
 		sshHandlers:       make(map[string]uint64),
 		routerAssignments: make(map[string]string),
+		claimManagers:     make(map[string]*sshpkg.SSHConnectionManager),
 		Recorder:          &fakeRecorder{},
 	}
 
@@ -200,6 +201,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		SSHRegistry:       sshpkg.NewRegistry(),
 		sshHandlers:       make(map[string]uint64),
 		routerAssignments: make(map[string]string),
+		claimManagers:     make(map[string]*sshpkg.SSHConnectionManager),
 		Recorder:          &fakeRecorder{},
 	}
 

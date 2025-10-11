@@ -68,6 +68,8 @@ type PublicIPClaimReconciler struct {
 	// Track router assignments to detect address changes
 	routerAssignments   map[string]string // key: "namespace/name" -> router address
 	routerAssignmentsMu sync.RWMutex
+	claimManagers       map[string]*sshpkg.SSHConnectionManager // key: "namespace/name" -> SSH manager
+	claimManagersMu     sync.RWMutex
 
 	// Event recorder for Kubernetes events
 	Recorder record.EventRecorder
@@ -203,7 +205,8 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil {
 			log.Error(err, "failed to get SSH manager for verification")
 			r.Recorder.Event(&claim, "Warning", "SSHError", err.Error())
-			return ctrl.Result{RequeueAfter: 60 * time.Minute}, err
+			// Return nil error to respect RequeueAfter (non-nil error causes immediate retry with backoff)
+			return ctrl.Result{RequeueAfter: 60 * time.Minute}, nil
 		}
 
 		// Verify state with comprehensive checks
@@ -249,7 +252,8 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Verification passed, update status
 		if err := r.Status().Update(ctx, &claim); err != nil {
 			log.Error(err, "failed to update status after verification")
-			return ctrl.Result{RequeueAfter: 60 * time.Minute}, err
+			// Return nil error to respect RequeueAfter (non-nil error causes immediate retry with backoff)
+			return ctrl.Result{RequeueAfter: 60 * time.Minute}, nil
 		}
 
 		log.V(1).Info("Periodic verification passed, requeueing", "ip", claim.Status.AssignedIP)
@@ -794,22 +798,28 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 			"previousRouter", previousRouter,
 			"newRouter", addr)
 
-		// Unregister old handler
+		// Unregister old handler using tracked manager reference
 		r.sshHandlerMu.Lock()
-		if oldHandlerID, exists := r.sshHandlers[handlerKey]; exists {
-			// Look up old manager (don't create if it doesn't exist)
-			prevMgr, _ := r.SSHRegistry.GetOrCreate(sshpkg.RouterConfig{
-				Address:           previousRouter,
-				Username:          config.Username,
-				AuthMethod:        config.AuthMethod,
-				HostKeyCallback:   config.HostKeyCallback,
-				Timeout:           config.Timeout,
-				KeepAliveInterval: config.KeepAliveInterval,
-				KeepAliveCommand:  config.KeepAliveCommand,
-			})
-			if prevMgr != nil {
+		oldHandlerID, handlerExists := r.sshHandlers[handlerKey]
+		r.sshHandlerMu.Unlock()
+
+		if handlerExists {
+			// Retrieve the tracked manager (avoids pointer identity issues)
+			r.claimManagersMu.RLock()
+			prevMgr, managerExists := r.claimManagers[handlerKey]
+			r.claimManagersMu.RUnlock()
+
+			if managerExists && prevMgr != nil {
 				prevMgr.UnregisterHandler(oldHandlerID)
+
+				r.sshHandlerMu.Lock()
 				delete(r.sshHandlers, handlerKey)
+				r.sshHandlerMu.Unlock()
+
+				r.claimManagersMu.Lock()
+				delete(r.claimManagers, handlerKey)
+				r.claimManagersMu.Unlock()
+
 				log.Info("Unregistered old handler", "handlerID", oldHandlerID, "router", previousRouter)
 
 				// Close old manager if no more handlers
@@ -820,9 +830,10 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 					}
 					r.SSHRegistry.Remove(previousRouter)
 				}
+			} else {
+				log.V(1).Info("old manager not found in tracking map, skipping cleanup", "router", previousRouter)
 			}
 		}
-		r.sshHandlerMu.Unlock()
 	}
 
 	// Register event handler with deduplication (Phase 2)
@@ -874,6 +885,11 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 		log.V(1).Info("SSH event handler already registered, skipping", "claim", handlerKey)
 	}
 	r.sshHandlerMu.Unlock()
+
+	// Track manager reference for this claim (prevents memory leak on router address changes)
+	r.claimManagersMu.Lock()
+	r.claimManagers[handlerKey] = mgr
+	r.claimManagersMu.Unlock()
 
 	// Track router assignment for this claim
 	r.routerAssignmentsMu.Lock()
@@ -968,6 +984,11 @@ checkManagerLifecycle:
 	delete(r.routerAssignments, handlerKey)
 	r.routerAssignmentsMu.Unlock()
 
+	// Remove claim manager tracking
+	r.claimManagersMu.Lock()
+	delete(r.claimManagers, handlerKey)
+	r.claimManagersMu.Unlock()
+
 	// If no more handlers registered for this manager, close it
 	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
 	if mgr.HandlerCount() == 0 {
@@ -998,6 +1019,11 @@ func (r *PublicIPClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize router assignments tracking map
 	if r.routerAssignments == nil {
 		r.routerAssignments = make(map[string]string)
+	}
+
+	// Initialize claim managers tracking map
+	if r.claimManagers == nil {
+		r.claimManagers = make(map[string]*sshpkg.SSHConnectionManager)
 	}
 
 	// Initialize event recorder if not set
