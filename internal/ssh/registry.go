@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -42,6 +43,19 @@ func (r *SSHManagerRegistry) GetOrCreate(cfg RouterConfig) (*SSHConnectionManage
 	return mgr, nil
 }
 
+// Lookup returns the first manager registered for the provided address.
+// It returns nil when no manager exists.
+func (r *SSHManagerRegistry) Lookup(address string) *SSHConnectionManager {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if entries, ok := r.managers[address]; ok {
+		for _, mgr := range entries {
+			return mgr
+		}
+	}
+	return nil
+}
+
 // Remove removes a manager from the registry without closing it.
 func (r *SSHManagerRegistry) Remove(address string) {
 	r.mu.Lock()
@@ -50,7 +64,7 @@ func (r *SSHManagerRegistry) Remove(address string) {
 }
 
 // CloseAll closes and removes all managers.
-func (r *SSHManagerRegistry) CloseAll() {
+func (r *SSHManagerRegistry) CloseAll() error {
 	r.mu.Lock()
 	managers := make([]*SSHConnectionManager, 0)
 	for addr, entries := range r.managers {
@@ -62,9 +76,18 @@ func (r *SSHManagerRegistry) CloseAll() {
 	}
 	r.mu.Unlock()
 
+	var errs []error
 	for _, mgr := range managers {
-		_ = mgr.Close()
+		if err := mgr.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return nil
 }
 
 // Len returns the number of tracked managers.

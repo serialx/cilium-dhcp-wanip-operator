@@ -21,23 +21,31 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
 	sshpkg "serialx.net/cilium-dhcp-wanip-operator/internal/ssh"
@@ -49,24 +57,104 @@ var (
 	gvrPoolV2a = schema.GroupVersionResource{Group: "cilium.io", Version: "v2alpha1", Resource: "ciliumloadbalancerippools"}
 )
 
-const finalizerName = "serialx.net/cleanup-wan-interface"
+const (
+	finalizerName       = "serialx.net/cleanup-wan-interface"
+	reconcileAnnotation = "serialx.net/last-reconnect"
+)
 
 // PublicIPClaimReconciler reconciles a PublicIPClaim object
 type PublicIPClaimReconciler struct {
 	client.Client
-	Kube    *kubernetes.Clientset
-	Dynamic dynamic.Interface
-	Scheme  *runtime.Scheme
+	Kube     *kubernetes.Clientset
+	Dynamic  dynamic.Interface
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 
 	// SSH connection management
-	SSHRegistry  *sshpkg.SSHManagerRegistry
-	sshHandlerMu sync.RWMutex
-	sshHandlers  map[string]uint64 // key: "namespace/name" -> handler ID
+	SSHRegistry         *sshpkg.SSHManagerRegistry
+	reconcileQueue      workqueue.RateLimitingInterface
+	routerAssignments   map[string]string
+	routerAssignmentsMu sync.RWMutex
+	sshHandlerMu        sync.RWMutex
+	sshHandlers         map[string]uint64 // key: "namespace/name" -> handler ID
 
 	runRouterScriptFn        func(context.Context, *networkv1alpha1.PublicIPClaim, string, string) (string, error)
 	ensureIPInPoolFn         func(context.Context, string, string) error
 	removeIPFromPoolFn       func(context.Context, string, string) error
 	cleanupRouterInterfaceFn func(context.Context, *networkv1alpha1.PublicIPClaim) error
+}
+
+type sshCleanupRunnable struct {
+	registry *sshpkg.SSHManagerRegistry
+	queue    workqueue.RateLimitingInterface
+}
+
+func (r *sshCleanupRunnable) Start(ctx context.Context) error {
+	<-ctx.Done()
+
+	if r.queue != nil {
+		r.queue.ShutDown()
+	}
+
+	if r.registry != nil {
+		return r.registry.CloseAll()
+	}
+
+	return nil
+}
+
+// processWorkQueue processes asynchronous reconciliation triggers coming from
+// SSH connection events. It touches the claim annotations to ensure the
+// controller runtime enqueues a reconcile request.
+func (r *PublicIPClaimReconciler) processWorkQueue(client client.Client) {
+	if r.reconcileQueue == nil {
+		return
+	}
+
+	logger := ctrllog.Log.WithName("publicipclaim-queue")
+
+	for {
+		item, shutdown := r.reconcileQueue.Get()
+		if shutdown {
+			return
+		}
+
+		func() {
+			defer r.reconcileQueue.Done(item)
+
+			req, ok := item.(reconcile.Request)
+			if !ok {
+				logger.Error(nil, "invalid item type in reconcile queue", "item", item)
+				r.reconcileQueue.Forget(item)
+				return
+			}
+
+			ctx := context.Background()
+			claim := &networkv1alpha1.PublicIPClaim{}
+			if err := client.Get(ctx, req.NamespacedName, claim); err != nil {
+				if !apierrors.IsNotFound(err) {
+					logger.Error(err, "failed to get claim for async reconcile", "request", req)
+					r.reconcileQueue.AddRateLimited(item)
+					return
+				}
+				r.reconcileQueue.Forget(item)
+				return
+			}
+
+			if claim.Annotations == nil {
+				claim.Annotations = make(map[string]string)
+			}
+			claim.Annotations[reconcileAnnotation] = time.Now().UTC().Format(time.RFC3339)
+
+			if err := client.Update(ctx, claim); err != nil {
+				logger.Error(err, "failed to update claim annotation for async reconcile", "claim", req)
+				r.reconcileQueue.AddRateLimited(item)
+				return
+			}
+
+			r.reconcileQueue.Forget(item)
+		}()
+	}
 }
 
 // +kubebuilder:rbac:groups=network.serialx.net,resources=publicipclaims,verbs=get;list;watch;create;update;patch;delete
@@ -134,60 +222,48 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 	}
 
-	// Handle router SSH events (Phase 2: automatic reconciliation on reboot/reconnect)
-	if eventTime, ok := claim.Annotations["network.serialx.net/last-router-event"]; ok {
-		eventReason := claim.Annotations["network.serialx.net/last-router-event-reason"]
-
-		log.Info("router SSH event detected, verifying state",
-			"eventTime", eventTime,
-			"eventReason", eventReason,
-			"wanInterface", claim.Status.WanInterface)
-
-		// Get SSH manager to verify state
+	if claim.Status.Phase == networkv1alpha1.ClaimPhaseReady && claim.Status.AssignedIP != "" {
 		mgr, err := r.getSSHManager(ctx, &claim)
 		if err != nil {
 			log.Error(err, "failed to get SSH manager for verification")
-		} else if claim.Status.WanInterface != "" {
-			// Verify interface state after router event
-			verifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-
-			exists, err := mgr.InterfaceExists(verifyCtx, claim.Status.WanInterface)
-			if err != nil || !exists {
-				log.Info("interface missing after router event, re-provisioning",
-					"interface", claim.Status.WanInterface,
-					"eventReason", eventReason)
-
-				// Clear status to trigger re-provisioning
-				claim.Status.Phase = networkv1alpha1.ClaimPhasePending
-				claim.Status.Message = fmt.Sprintf("Re-provisioning after %s", eventReason)
-				claim.Status.WanInterface = ""
-				claim.Status.AssignedIP = ""
-				if err := r.Status().Update(ctx, &claim); err != nil {
-					log.Error(err, "failed to update status for re-provisioning")
-					return ctrl.Result{}, err
-				}
-			} else {
-				log.Info("interface exists after router event, state OK",
-					"interface", claim.Status.WanInterface)
+			if r.Recorder != nil {
+				r.Recorder.Event(&claim, corev1.EventTypeWarning, "SSHError", err.Error())
 			}
+			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 
-		// Clear event annotations after handling
-		delete(claim.Annotations, "network.serialx.net/last-router-event")
-		delete(claim.Annotations, "network.serialx.net/last-router-event-reason")
-		if err := r.Update(ctx, &claim); err != nil {
-			log.Error(err, "failed to clear event annotations")
+		verifyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		verifyErr := r.verifyClaimState(verifyCtx, &claim, mgr)
+		cancel()
+		if verifyErr == nil {
+			if err := r.Status().Update(ctx, &claim); err != nil {
+				log.Error(err, "failed to update status after verification")
+				return ctrl.Result{}, err
+			}
+			log.V(1).Info("state verification succeeded", "wanInterface", claim.Status.WanInterface)
+			return ctrl.Result{RequeueAfter: 60 * time.Minute}, nil
 		}
 
-		// Re-queue to continue reconciliation
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
+		log.Info("state verification failed, re-provisioning required", "reason", verifyErr.Error())
 
-	// Skip if already successfully assigned
-	if claim.Status.Phase == networkv1alpha1.ClaimPhaseReady && claim.Status.AssignedIP != "" {
-		log.V(1).Info("claim already in Ready state, skipping", "ip", claim.Status.AssignedIP)
-		return ctrl.Result{}, nil
+		claim.Status.Phase = networkv1alpha1.ClaimPhasePending
+		claim.Status.Message = fmt.Sprintf("Reapplying after verification failure: %v", verifyErr)
+		claim.Status.AssignedIP = ""
+		claim.Status.WanInterface = ""
+		claim.Status.MacAddress = ""
+		claim.Status.ConfigurationVerified = false
+		claim.Status.LastReconciliationReason = "reapply_after_verification"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ReapplyPending",
+			Message:            verifyErr.Error(),
+			ObservedGeneration: claim.Generation,
+		})
+		if err := r.Status().Update(ctx, &claim); err != nil {
+			log.Error(err, "failed to update status after verification failure")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Skip if work is already in progress (WanInterface populated but not Ready yet)
@@ -280,10 +356,33 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	log.Info("IP added to Cilium pool successfully", "pool", claim.Spec.PoolName, "ip", ip)
 
+	if mgr, err := r.getSSHManager(ctx, &claim); err == nil {
+		uptimeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if uptime, err := mgr.GetRouterUptime(uptimeCtx); err == nil {
+			claim.Status.RouterUptime = int64(uptime / time.Second)
+		}
+		cancel()
+	}
+
 	// 4) Update status with all fields at once (single update to avoid conflicts)
+	now := metav1.Now()
 	claim.Status.AssignedIP = ip
 	claim.Status.Phase = networkv1alpha1.ClaimPhaseReady
 	claim.Status.Message = "Assigned"
+	claim.Status.LastVerified = &now
+	claim.Status.ConfigurationVerified = true
+	claim.Status.LastReconciliationReason = "configuration_applied"
+	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "ConfigurationApplied",
+		Message:            "Configuration applied successfully",
+		ObservedGeneration: claim.Generation,
+		LastTransitionTime: now,
+	})
+	if r.Recorder != nil {
+		r.Recorder.Event(&claim, corev1.EventTypeNormal, "ConfigurationApplied", "Configuration applied successfully")
+	}
 	if err := r.Status().Update(ctx, &claim); err != nil {
 		log.Error(err, "failed to update status")
 		return ctrl.Result{}, err
@@ -524,10 +623,54 @@ func coalesceInt(a, b int) int {
 func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, err error) (ctrl.Result, error) {
 	claim.Status.Phase = networkv1alpha1.ClaimPhaseFailed
 	claim.Status.Message = err.Error()
+	claim.Status.ConfigurationVerified = false
+	claim.Status.LastReconciliationReason = "failed"
+	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ProvisioningFailed",
+		Message:            err.Error(),
+		ObservedGeneration: claim.Generation,
+	})
+	if r.Recorder != nil {
+		r.Recorder.Event(claim, corev1.EventTypeWarning, "ProvisioningFailed", err.Error())
+	}
 	if updateErr := r.Status().Update(ctx, claim); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
 	return ctrl.Result{}, err
+}
+
+func (r *PublicIPClaimReconciler) validateSSHCredentials(ctx context.Context, routerHost, secretName, claimKey string) error {
+	if routerHost == "" || secretName == "" {
+		return nil
+	}
+
+	claims := &networkv1alpha1.PublicIPClaimList{}
+	if err := r.List(ctx, claims); err != nil {
+		return fmt.Errorf("failed to list claims: %w", err)
+	}
+
+	for _, existing := range claims.Items {
+		if existing.Spec.Router.Host != routerHost {
+			continue
+		}
+		existingKey := fmt.Sprintf("%s/%s", existing.Namespace, existing.Name)
+		if existingKey == claimKey {
+			continue
+		}
+		if existing.Spec.Router.SSHSecretRef != secretName {
+			return fmt.Errorf("SSH credential mismatch for router %s: claim %s/%s uses secret %q but requested %q",
+				routerHost,
+				existing.Namespace,
+				existing.Name,
+				existing.Spec.Router.SSHSecretRef,
+				secretName,
+			)
+		}
+	}
+
+	return nil
 }
 
 // getSSHManager retrieves or creates an SSH manager for the claim's router.
@@ -536,6 +679,12 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 	log := ctrllog.FromContext(ctx)
 
 	// Get SSH credentials from secret
+	claimKey := fmt.Sprintf("%s/%s", claim.Namespace, claim.Name)
+
+	if err := r.validateSSHCredentials(ctx, claim.Spec.Router.Host, claim.Spec.Router.SSHSecretRef, claimKey); err != nil {
+		return nil, err
+	}
+
 	sec := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
 		return nil, fmt.Errorf("failed to get SSH secret: %w", err)
@@ -553,14 +702,51 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 
 	// Build SSH manager config
 	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
+
+	hostKeyCallback := ssh.InsecureIgnoreHostKey()
+	if info, err := os.Stat("/etc/ssh-operator/known_hosts"); err == nil && !info.IsDir() {
+		if callback, err := knownhosts.New("/etc/ssh-operator/known_hosts"); err == nil {
+			hostKeyCallback = callback
+		} else {
+			log.Error(err, "failed to load known_hosts, falling back to insecure host key verification")
+		}
+	}
+
 	config := sshpkg.RouterConfig{
 		Address:           addr,
 		Username:          claim.Spec.Router.User,
 		AuthMethod:        ssh.PublicKeys(signer),
-		HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback:   hostKeyCallback,
 		Timeout:           30 * time.Second,
 		KeepAliveInterval: 30 * time.Second,
 		KeepAliveCommand:  "cat /proc/uptime",
+	}
+
+	if r.SSHRegistry == nil {
+		r.SSHRegistry = sshpkg.NewRegistry()
+	}
+
+	// If the claim previously pointed to a different router, unregister the old handler
+	r.routerAssignmentsMu.RLock()
+	previousRouter := r.routerAssignments[claimKey]
+	r.routerAssignmentsMu.RUnlock()
+
+	if previousRouter != "" && previousRouter != addr {
+		if prevMgr := r.SSHRegistry.Lookup(previousRouter); prevMgr != nil {
+			r.sshHandlerMu.Lock()
+			if handlerID, exists := r.sshHandlers[claimKey]; exists {
+				prevMgr.UnregisterHandler(handlerID)
+				delete(r.sshHandlers, claimKey)
+			}
+			r.sshHandlerMu.Unlock()
+
+			if prevMgr.HandlerCount() == 0 {
+				if err := prevMgr.Close(); err != nil {
+					log.Error(err, "failed to close SSH manager after router change", "router", previousRouter)
+				}
+				r.SSHRegistry.Remove(previousRouter)
+			}
+		}
 	}
 
 	// Get or create manager from registry
@@ -570,14 +756,21 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 	}
 
 	// Start manager if not already started
-	// The manager handles "already started" gracefully by returning an error we can ignore
 	if !mgr.IsConnected() && !mgr.IsReconnecting() {
 		if err := mgr.Start(ctx); err != nil {
-			// Manager starts in background, log but continue
 			log.V(1).Info("SSH manager starting in background", "router", addr, "error", err.Error())
 		} else {
 			log.Info("SSH manager started", "router", addr)
 		}
+	}
+
+	switch {
+	case mgr.IsConnected():
+		claim.Status.ConnectionState = "Connected"
+	case mgr.IsReconnecting():
+		claim.Status.ConnectionState = "Reconnecting"
+	default:
+		claim.Status.ConnectionState = "Disconnected"
 	}
 
 	// Register event handler with deduplication (Phase 2)
@@ -585,53 +778,170 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 
 	r.sshHandlerMu.Lock()
 	if _, exists := r.sshHandlers[handlerKey]; !exists {
-		// Only register if not already registered (prevents memory leaks)
 		handlerID := mgr.RegisterHandler(func(event sshpkg.Event) {
-			// CRITICAL: Use background context, not parent context
-			// Handler may fire after reconciliation completes
 			bgCtx := context.Background()
 
-			log.Info("Router SSH event detected",
-				"router", addr,
-				"reason", event.Reason,
-				"claim", handlerKey)
+			log.Info("Router SSH event detected", "router", addr, "reason", event.Reason, "claim", handlerKey)
 
-			// Trigger reconciliation by updating claim annotation
-			var updatedClaim networkv1alpha1.PublicIPClaim
-			if err := r.Get(bgCtx, client.ObjectKey{
-				Name:      claim.Name,
-				Namespace: claim.Namespace,
-			}, &updatedClaim); err != nil {
-				log.Error(err, "failed to get claim in event handler", "claim", handlerKey)
-				return
+			if r.reconcileQueue != nil {
+				r.reconcileQueue.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 			}
 
-			if updatedClaim.Annotations == nil {
-				updatedClaim.Annotations = make(map[string]string)
-			}
-			updatedClaim.Annotations["network.serialx.net/last-router-event"] = time.Now().Format(time.RFC3339)
-			updatedClaim.Annotations["network.serialx.net/last-router-event-reason"] = string(event.Reason)
-
-			if err := r.Update(bgCtx, &updatedClaim); err != nil {
-				log.Error(err, "failed to update claim annotations in event handler", "claim", handlerKey)
-			} else {
-				log.V(1).Info("claim annotations updated, reconciliation will be triggered",
-					"claim", handlerKey,
-					"reason", event.Reason)
+			if r.Recorder != nil {
+				currentClaim := &networkv1alpha1.PublicIPClaim{}
+				if err := r.Get(bgCtx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, currentClaim); err == nil {
+					switch event.Reason {
+					case sshpkg.ReasonReconnectSuccess:
+						r.Recorder.Event(currentClaim, corev1.EventTypeNormal, "SSHConnected", "SSH connection established")
+					case sshpkg.ReasonConnectionDrop:
+						r.Recorder.Event(currentClaim, corev1.EventTypeWarning, "SSHDisconnected", "SSH connection dropped")
+					case sshpkg.ReasonReboot:
+						r.Recorder.Event(currentClaim, corev1.EventTypeWarning, "RouterRebooted", "Router reboot detected")
+					}
+				} else if !apierrors.IsNotFound(err) {
+					log.Error(err, "failed to fetch claim for event recording", "claim", handlerKey)
+				}
 			}
 		})
 
 		r.sshHandlers[handlerKey] = handlerID
-		log.Info("registered SSH event handler",
-			"claim", handlerKey,
-			"handlerID", handlerID,
-			"router", addr)
+		log.Info("registered SSH event handler", "claim", handlerKey, "handlerID", handlerID, "router", addr)
 	} else {
 		log.V(1).Info("SSH event handler already registered, skipping", "claim", handlerKey)
 	}
 	r.sshHandlerMu.Unlock()
 
+	r.routerAssignmentsMu.Lock()
+	r.routerAssignments[claimKey] = addr
+	r.routerAssignmentsMu.Unlock()
+
 	return mgr, nil
+}
+
+func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, mgr *sshpkg.SSHConnectionManager) error {
+	log := ctrllog.FromContext(ctx)
+
+	uptimeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	uptime, err := mgr.GetRouterUptime(uptimeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to get router uptime: %w", err)
+	}
+
+	currentSeconds := int64(uptime / time.Second)
+	if claim.Status.RouterUptime > 0 && currentSeconds < claim.Status.RouterUptime {
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeWarning, "RouterRebooted", "Router reboot detected, reapplying configuration")
+		}
+		claim.Status.ConfigurationVerified = false
+		claim.Status.RouterUptime = currentSeconds
+		claim.Status.LastReconciliationReason = "router_reboot"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "RouterRebooted",
+			Message:            "Router reboot detected",
+			ObservedGeneration: claim.Generation,
+		})
+		return fmt.Errorf("router reboot detected")
+	}
+	claim.Status.RouterUptime = currentSeconds
+
+	if claim.Status.WanInterface == "" {
+		claim.Status.ConfigurationVerified = false
+		claim.Status.LastReconciliationReason = "interface_pending"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "InterfacePending",
+			Message:            "WAN interface not yet provisioned",
+			ObservedGeneration: claim.Generation,
+		})
+		return fmt.Errorf("wan interface not yet recorded")
+	}
+
+	ifaceCtx, cancelIface := context.WithTimeout(ctx, 10*time.Second)
+	exists, err := mgr.InterfaceExists(ifaceCtx, claim.Status.WanInterface)
+	cancelIface()
+	if err != nil {
+		return fmt.Errorf("failed to check interface existence: %w", err)
+	}
+	if !exists {
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeWarning, "ConfigurationDrift", "Interface missing, reapplying configuration")
+		}
+		claim.Status.ConfigurationVerified = false
+		claim.Status.LastReconciliationReason = "interface_missing"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "InterfaceMissing",
+			Message:            "Router interface missing",
+			ObservedGeneration: claim.Generation,
+		})
+		return fmt.Errorf("interface %s missing", claim.Status.WanInterface)
+	}
+
+	dhcpCtx, cancelDHCP := context.WithTimeout(ctx, 10*time.Second)
+	running, err := mgr.IsUdhcpcRunningOnInterface(dhcpCtx, claim.Status.WanInterface)
+	cancelDHCP()
+	if err != nil {
+		return fmt.Errorf("failed to check udhcpc status: %w", err)
+	}
+	if !running {
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeWarning, "DHCPClientStopped", "DHCP client not running, reapplying configuration")
+		}
+		claim.Status.ConfigurationVerified = false
+		claim.Status.LastReconciliationReason = "dhcp_client_stopped"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "DHCPClientStopped",
+			Message:            "DHCP client stopped",
+			ObservedGeneration: claim.Generation,
+		})
+		return fmt.Errorf("dhcp client not running for %s", claim.Status.WanInterface)
+	}
+
+	arpCtx, cancelARP := context.WithTimeout(ctx, 10*time.Second)
+	proxyARPEnabled, err := mgr.IsProxyARPEnabled(arpCtx, claim.Status.WanInterface)
+	cancelARP()
+	if err != nil {
+		return fmt.Errorf("failed to check proxy ARP: %w", err)
+	}
+	if !proxyARPEnabled {
+		if r.Recorder != nil {
+			r.Recorder.Event(claim, corev1.EventTypeWarning, "ProxyARPDisabled", "Proxy ARP disabled, reapplying configuration")
+		}
+		claim.Status.ConfigurationVerified = false
+		claim.Status.LastReconciliationReason = "proxy_arp_disabled"
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ProxyARPDisabled",
+			Message:            "Proxy ARP disabled",
+			ObservedGeneration: claim.Generation,
+		})
+		return fmt.Errorf("proxy arp disabled for %s", claim.Status.WanInterface)
+	}
+
+	now := metav1.Now()
+	claim.Status.LastVerified = &now
+	claim.Status.ConfigurationVerified = true
+	claim.Status.LastReconciliationReason = "verified"
+	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "ConfigurationVerified",
+		Message:            "Interface, DHCP client, and proxy ARP verified",
+		ObservedGeneration: claim.Generation,
+		LastTransitionTime: now,
+	})
+
+	log.V(1).Info("state verification passed", "interface", claim.Status.WanInterface)
+	return nil
 }
 
 func (r *PublicIPClaimReconciler) cleanupRouterInterface(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) error {
@@ -714,6 +1024,10 @@ checkManagerLifecycle:
 	}
 	r.sshHandlerMu.Unlock()
 
+	r.routerAssignmentsMu.Lock()
+	delete(r.routerAssignments, handlerKey)
+	r.routerAssignmentsMu.Unlock()
+
 	// If no more handlers registered for this manager, close it
 	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
 	if mgr.HandlerCount() == 0 {
@@ -736,13 +1050,31 @@ checkManagerLifecycle:
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PublicIPClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Initialize SSH event handler tracking map
 	if r.sshHandlers == nil {
 		r.sshHandlers = make(map[string]uint64)
 	}
+	if r.routerAssignments == nil {
+		r.routerAssignments = make(map[string]string)
+	}
+	if r.SSHRegistry == nil {
+		r.SSHRegistry = sshpkg.NewRegistry()
+	}
+	if r.reconcileQueue == nil {
+		r.reconcileQueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	}
+
+	if err := mgr.Add(&sshCleanupRunnable{
+		registry: r.SSHRegistry,
+		queue:    r.reconcileQueue,
+	}); err != nil {
+		return err
+	}
+
+	go r.processWorkQueue(mgr.GetClient())
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1alpha1.PublicIPClaim{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 3}).
 		Named("publicipclaim").
 		Complete(r)
 }

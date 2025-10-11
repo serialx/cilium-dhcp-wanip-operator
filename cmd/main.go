@@ -191,7 +191,10 @@ func main() {
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		<-ctx.Done()
 		setupLog.Info("shutting down SSH manager registry")
-		sshRegistry.CloseAll()
+		if err := sshRegistry.CloseAll(); err != nil {
+			setupLog.Error(err, "failed to close SSH manager registry")
+			return err
+		}
 		return nil
 	})); err != nil {
 		setupLog.Error(err, "unable to add SSH registry cleanup")

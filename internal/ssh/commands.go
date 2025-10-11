@@ -65,6 +65,34 @@ func (m *SSHConnectionManager) IsUdhcpcRunning(ctx context.Context) (bool, error
 	return strings.Contains(string(out), "true"), nil
 }
 
+// IsUdhcpcRunningOnInterface determines if a udhcpc instance is running for the
+// provided interface by inspecting its PID file and validating that the
+// referenced process is alive.
+func (m *SSHConnectionManager) IsUdhcpcRunningOnInterface(ctx context.Context, iface string) (bool, error) {
+	if err := validateInterfaceName(iface); err != nil {
+		return false, err
+	}
+
+	pidFile := fmt.Sprintf("/var/run/udhcpc.%s.pid", iface)
+	cmd := fmt.Sprintf(`PID_FILE=%s
+if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                echo true
+        else
+                echo false
+        fi
+else
+        echo false
+fi`, shellQuote(pidFile))
+
+	out, err := m.RunCommand(ctx, cmd)
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(string(out), "true"), nil
+}
+
 // GetInterfaceMAC reads the MAC address for a given interface.
 func (m *SSHConnectionManager) GetInterfaceMAC(ctx context.Context, iface string) (string, error) {
 	if err := validateInterfaceName(iface); err != nil {

@@ -108,6 +108,30 @@ type PublicIPClaimStatus struct {
 	// MacAddress is the actual MAC address used for DHCP
 	// +optional
 	MacAddress string `json:"macAddress,omitempty"`
+
+	// RouterUptime stores the last observed router uptime in seconds
+	// +optional
+	RouterUptime int64 `json:"routerUptime,omitempty"`
+
+	// LastVerified records when the configuration was last verified successfully
+	// +optional
+	LastVerified *metav1.Time `json:"lastVerified,omitempty"`
+
+	// ConfigurationVerified indicates whether the last verification succeeded
+	// +optional
+	ConfigurationVerified bool `json:"configurationVerified,omitempty"`
+
+	// LastReconciliationReason captures why the last reconciliation ran
+	// +optional
+	LastReconciliationReason string `json:"lastReconciliationReason,omitempty"`
+
+	// ConnectionState reflects the SSH connection state to the router
+	// +optional
+	ConnectionState string `json:"connectionState,omitempty"`
+
+	// Conditions provides granular readiness information
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

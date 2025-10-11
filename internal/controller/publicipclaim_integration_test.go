@@ -33,6 +33,7 @@ import (
 	"github.com/onsi/gomega"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -64,6 +65,31 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 203.0.113.77
 `,
 			ExitStatus: 0,
+		},
+		{
+			ExpectContains: "/proc/uptime",
+			Output:         "100.00 0\n",
+			ExitStatus:     0,
+		},
+		{
+			ExpectContains: "/proc/uptime",
+			Output:         "105.00 0\n",
+			ExitStatus:     0,
+		},
+		{
+			ExpectContains: "/sys/class/net/",
+			Output:         "true\n",
+			ExitStatus:     0,
+		},
+		{
+			ExpectContains: "/var/run/udhcpc.",
+			Output:         "true\n",
+			ExitStatus:     0,
+		},
+		{
+			ExpectContains: "/proc/sys/net/ipv4/conf/",
+			Output:         "1\n",
+			ExitStatus:     0,
 		},
 		{
 			ExpectContains: "/sys/class/net/",
@@ -148,7 +174,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	res, err = reconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
+	g.Expect(res.RequeueAfter).To(gomega.Equal(60 * time.Minute))
 
 	updated := &networkv1alpha1.PublicIPClaim{}
 	g.Expect(c.Get(ctx, req.NamespacedName, updated)).To(gomega.Succeed())
@@ -157,6 +183,11 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 	g.Expect(updated.Status.AssignedIP).To(gomega.Equal("203.0.113.77"))
 	g.Expect(updated.Status.WanInterface).To(gomega.HavePrefix("wan-"))
 	g.Expect(updated.Status.MacAddress).To(gomega.MatchRegexp(`^02:[0-9a-f]{2}(:[0-9a-f]{2}){4}$`))
+	g.Expect(updated.Status.ConfigurationVerified).To(gomega.BeTrue())
+	g.Expect(updated.Status.LastVerified).NotTo(gomega.BeNil())
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+	g.Expect(readyCond).NotTo(gomega.BeNil())
+	g.Expect(readyCond.Status).To(gomega.Equal(metav1.ConditionTrue))
 
 	poolObj, err := dynClient.Resource(schema.GroupVersionResource{
 		Group:    "cilium.io",
@@ -171,10 +202,15 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 	g.Expect(blocks[0].(map[string]interface{})["cidr"]).To(gomega.Equal("203.0.113.77/32"))
 
 	commands := sshServer.Commands()
-	g.Expect(commands).To(gomega.HaveLen(1))
+	g.Expect(commands).To(gomega.HaveLen(6))
 	g.Expect(commands[0]).To(gomega.ContainSubstring(fmt.Sprintf("WAN_PARENT=\"%s\"", claim.Spec.Router.WanParent)))
 	g.Expect(commands[0]).To(gomega.ContainSubstring(fmt.Sprintf("WAN_IF=\"%s\"", updated.Status.WanInterface)))
 	g.Expect(commands[0]).To(gomega.ContainSubstring(fmt.Sprintf("WAN_MAC=\"%s\"", updated.Status.MacAddress)))
+	g.Expect(commands[1]).To(gomega.ContainSubstring("/proc/uptime"))
+	g.Expect(commands[2]).To(gomega.ContainSubstring("/proc/uptime"))
+	g.Expect(commands[3]).To(gomega.ContainSubstring("/sys/class/net/"))
+	g.Expect(commands[4]).To(gomega.ContainSubstring("/var/run/udhcpc."))
+	g.Expect(commands[5]).To(gomega.ContainSubstring("/proc/sys/net/ipv4/conf/"))
 
 	g.Expect(updated.Finalizers).To(gomega.ContainElement(finalizerName))
 
@@ -203,9 +239,9 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
 
 	commands = sshServer.Commands()
-	g.Expect(commands).To(gomega.HaveLen(3))
-	g.Expect(commands[1]).To(gomega.ContainSubstring("/sys/class/net/"))
-	g.Expect(commands[2]).To(gomega.ContainSubstring("kill $(cat \"$PID_FILE\")"))
+	g.Expect(commands).To(gomega.HaveLen(8))
+	g.Expect(commands[6]).To(gomega.ContainSubstring("/sys/class/net/"))
+	g.Expect(commands[7]).To(gomega.ContainSubstring("kill $(cat \"$PID_FILE\")"))
 
 	poolObj, err = dynClient.Resource(schema.GroupVersionResource{
 		Group:    "cilium.io",

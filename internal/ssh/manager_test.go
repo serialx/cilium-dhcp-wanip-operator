@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -142,11 +143,24 @@ func TestRegistryDifferentConfigs(t *testing.T) {
 }
 
 func TestCommandHelpers(t *testing.T) {
+	ifaceCmd := fmt.Sprintf(`PID_FILE=%s
+if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                echo true
+        else
+                echo false
+        fi
+else
+        echo false
+fi`, shellQuote("/var/run/udhcpc.eth0.pid"))
+
 	runner := &fakeRunner{responses: map[string][]byte{
 		"cat /proc/uptime": []byte("100.00 0\n"),
-		"if [ -d '/sys/class/net/eth0' ]; then echo true; else echo false; fi":                       []byte("true\n"),
-		"if pgrep -x udhcpc >/dev/null 2>&1; then echo true; else echo false; fi":                    []byte("false\n"),
-		"cat '/sys/class/net/eth0/address'":                                                          []byte("aa:bb:cc:dd:ee:ff\n"),
+		"if [ -d '/sys/class/net/eth0' ]; then echo true; else echo false; fi":    []byte("true\n"),
+		"if pgrep -x udhcpc >/dev/null 2>&1; then echo true; else echo false; fi": []byte("false\n"),
+		ifaceCmd:                            []byte("true\n"),
+		"cat '/sys/class/net/eth0/address'": []byte("aa:bb:cc:dd:ee:ff\n"),
 		"ip -4 -o addr show dev 'eth0' scope global | awk 'NR==1 {split($4, a, \"/\"); print a[1]}'": []byte("192.0.2.10\n"),
 		"cat '/proc/sys/net/ipv4/conf/eth0/proxy_arp'":                                               []byte("1\n"),
 		"cat '/sys/class/net/eth0/operstate'":                                                        []byte("up\n"),
@@ -179,6 +193,14 @@ func TestCommandHelpers(t *testing.T) {
 	}
 	if running {
 		t.Fatalf("expected udhcpc not running")
+	}
+
+	ifaceRunning, err := mgr.IsUdhcpcRunningOnInterface(context.Background(), "eth0")
+	if err != nil {
+		t.Fatalf("IsUdhcpcRunningOnInterface: %v (commands: %#v)", err, runner.calls)
+	}
+	if !ifaceRunning {
+		t.Fatalf("expected udhcpc running for interface")
 	}
 
 	mac, err := mgr.GetInterfaceMAC(context.Background(), "eth0")
