@@ -175,6 +175,7 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				claim.Status.Message = fmt.Sprintf("Re-provisioning after %s", eventReason)
 				claim.Status.WanInterface = ""
 				claim.Status.AssignedIP = ""
+				claim.Status.RouterUptime = 0 // Reset uptime baseline to prevent false reboot detection
 				if err := r.Status().Update(ctx, &claim); err != nil {
 					log.Error(err, "failed to update status for re-provisioning")
 					return ctrl.Result{}, err
@@ -223,6 +224,7 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			oldIP := claim.Status.AssignedIP
 			claim.Status.AssignedIP = ""
 			claim.Status.ConfigurationVerified = false
+			claim.Status.RouterUptime = 0 // Reset uptime baseline to prevent false reboot detection
 
 			// Update condition to indicate drift/recovery
 			meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
