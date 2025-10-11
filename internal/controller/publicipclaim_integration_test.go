@@ -113,11 +113,13 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		Build()
 
 	reconciler := &PublicIPClaimReconciler{
-		Client:      c,
-		Dynamic:     dynClient,
-		Scheme:      scheme,
-		SSHRegistry: sshpkg.NewRegistry(),
-		sshHandlers: make(map[string]uint64),
+		Client:            c,
+		Dynamic:           dynClient,
+		Scheme:            scheme,
+		SSHRegistry:       sshpkg.NewRegistry(),
+		sshHandlers:       make(map[string]uint64),
+		routerAssignments: make(map[string]string),
+		Recorder:          &fakeRecorder{},
 	}
 
 	claim := &networkv1alpha1.PublicIPClaim{
@@ -148,7 +150,8 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	res, err = reconciler.Reconcile(ctx, req)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(res.RequeueAfter).To(gomega.Equal(time.Duration(0)))
+	// After successful provisioning, should requeue for periodic verification (60 minutes)
+	g.Expect(res.RequeueAfter).To(gomega.Equal(60 * time.Minute))
 
 	updated := &networkv1alpha1.PublicIPClaim{}
 	g.Expect(c.Get(ctx, req.NamespacedName, updated)).To(gomega.Succeed())
@@ -191,11 +194,13 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 
 	// Create new reconciler for deletion test to avoid mutating the original
 	deleteReconciler := &PublicIPClaimReconciler{
-		Client:      deleteClient,
-		Dynamic:     dynClient,
-		Scheme:      scheme,
-		SSHRegistry: sshpkg.NewRegistry(),
-		sshHandlers: make(map[string]uint64),
+		Client:            deleteClient,
+		Dynamic:           dynClient,
+		Scheme:            scheme,
+		SSHRegistry:       sshpkg.NewRegistry(),
+		sshHandlers:       make(map[string]uint64),
+		routerAssignments: make(map[string]string),
+		Recorder:          &fakeRecorder{},
 	}
 
 	res, err = deleteReconciler.Reconcile(ctx, req)

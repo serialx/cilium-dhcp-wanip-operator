@@ -92,7 +92,11 @@ func TestReconcileSuccess(t *testing.T) {
 		WithObjects(claim, secret).
 		Build()
 
-	r := &PublicIPClaimReconciler{Client: c, Scheme: scheme}
+	r := &PublicIPClaimReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: &fakeRecorder{},
+	}
 
 	expectedWan := "wan-" + sanitizeName(claim.Name)
 	scriptCalled := false

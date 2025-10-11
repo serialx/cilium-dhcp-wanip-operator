@@ -75,6 +75,18 @@ const (
 	ClaimPhaseFailed       ClaimPhase = "Failed"
 )
 
+// Condition types for PublicIPClaim
+const (
+	// ConditionReady indicates the claim is ready and configuration is verified
+	ConditionReady = "Ready"
+
+	// ConditionConfigurationDrifted indicates router state doesn't match desired state
+	ConditionConfigurationDrifted = "ConfigurationDrifted"
+
+	// ConditionRecovering indicates operator is reapplying configuration
+	ConditionRecovering = "Recovering"
+)
+
 // PublicIPClaimSpec defines the desired state of PublicIPClaim
 type PublicIPClaimSpec struct {
 	// PoolName is the name of the CiliumLoadBalancerIPPool to update
@@ -108,6 +120,35 @@ type PublicIPClaimStatus struct {
 	// MacAddress is the actual MAC address used for DHCP
 	// +optional
 	MacAddress string `json:"macAddress,omitempty"`
+
+	// RouterUptime is the router uptime in seconds at last check (used to detect reboots)
+	// +optional
+	RouterUptime int64 `json:"routerUptime,omitempty"`
+
+	// LastVerified is the timestamp when configuration was last verified on the router
+	// +optional
+	LastVerified *metav1.Time `json:"lastVerified,omitempty"`
+
+	// ConfigurationVerified indicates whether current configuration has been verified on router
+	// +optional
+	ConfigurationVerified bool `json:"configurationVerified,omitempty"`
+
+	// LastReconciliationReason indicates the reason for the last reconciliation
+	// Possible values: router_reboot, interface_missing, dhcp_client_stopped, proxy_arp_disabled,
+	// periodic_check, verified, configuration_applied
+	// +optional
+	LastReconciliationReason string `json:"lastReconciliationReason,omitempty"`
+
+	// ConnectionState indicates the SSH connection state to the router
+	// Possible values: connected, reconnecting, disconnected
+	// +optional
+	ConnectionState string `json:"connectionState,omitempty"`
+
+	// Conditions represent the latest available observations of the claim's state
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -116,6 +157,8 @@ type PublicIPClaimStatus struct {
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.poolName`
 // +kubebuilder:printcolumn:name="IP",type=string,JSONPath=`.status.assignedIP`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Connection",type=string,JSONPath=`.status.connectionState`,priority=1
+// +kubebuilder:printcolumn:name="Last Verified",type=date,JSONPath=`.status.lastVerified`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // PublicIPClaim is the Schema for the publicipclaims API

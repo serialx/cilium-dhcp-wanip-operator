@@ -39,9 +39,17 @@ func TestReconcileResourceNotFound(t *testing.T) {
 	}
 }
 
-// TestReconcileAlreadyReady tests skipping already ready claims
+// TestReconcileAlreadyReady tests periodic verification for ready claims
 func TestReconcileAlreadyReady(t *testing.T) {
 	scheme := runtimeScheme(t)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "router-key",
+			Namespace: "kube-system",
+		},
+		Data: map[string][]byte{"id_rsa": []byte("dummy-key-data")},
+	}
+
 	claim := &networkv1alpha1.PublicIPClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "ready-claim",
@@ -50,27 +58,49 @@ func TestReconcileAlreadyReady(t *testing.T) {
 		},
 		Spec: networkv1alpha1.PublicIPClaimSpec{
 			PoolName: "public-pool",
+			Router: networkv1alpha1.RouterSpec{
+				Host:         "router.local",
+				User:         "admin",
+				SSHSecretRef: "router-key",
+				Command:      "/bin/script.sh",
+				WanParent:    "eth0",
+			},
 		},
 		Status: networkv1alpha1.PublicIPClaimStatus{
-			Phase:      networkv1alpha1.ClaimPhaseReady,
-			AssignedIP: "203.0.113.10",
+			Phase:        networkv1alpha1.ClaimPhaseReady,
+			AssignedIP:   "203.0.113.10",
+			WanInterface: "wan-test",
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&networkv1alpha1.PublicIPClaim{}).WithObjects(claim).Build()
-	r := &PublicIPClaimReconciler{Client: c, Scheme: scheme}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&networkv1alpha1.PublicIPClaim{}).WithObjects(claim, secret).Build()
+	r := &PublicIPClaimReconciler{
+		Client:            c,
+		Scheme:            scheme,
+		SSHRegistry:       nil, // Will trigger error in verification
+		routerAssignments: make(map[string]string),
+		sshHandlers:       make(map[string]uint64),
+		Recorder:          &fakeRecorder{},
+	}
 
 	ctx := context.Background()
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
 
-	// Should skip processing when already Ready
+	// Should perform periodic verification and requeue after 60 minutes (even if verification fails due to nil registry)
 	res, err := r.Reconcile(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// We expect an error because SSHRegistry is nil, but result should still have RequeueAfter set
+	if res.RequeueAfter != 60*time.Minute {
+		t.Fatalf("expected requeue after 60 minutes for Ready claim, got: %v (err: %v)", res, err)
 	}
-	if res != (ctrl.Result{}) {
-		t.Fatalf("expected empty result for ready claim, got: %v", res)
-	}
+}
+
+// fakeRecorder implements record.EventRecorder for testing
+type fakeRecorder struct{}
+
+func (f *fakeRecorder) Event(object runtime.Object, eventtype, reason, message string) {}
+func (f *fakeRecorder) Eventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+}
+func (f *fakeRecorder) AnnotatedEventf(object runtime.Object, annotations map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
 }
 
 // TestReconcileInProgress tests skipping claims that are in progress
