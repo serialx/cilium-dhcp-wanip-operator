@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -57,9 +58,10 @@ type PublicIPClaimReconciler struct {
 	Dynamic dynamic.Interface
 	Scheme  *runtime.Scheme
 
-	// SSH connection management (Phase 1: connection pooling)
-	// Phase 2 will add: sshHandlerMu, sshHandlers for event handler tracking
-	SSHRegistry *sshpkg.SSHManagerRegistry
+	// SSH connection management
+	SSHRegistry  *sshpkg.SSHManagerRegistry
+	sshHandlerMu sync.RWMutex
+	sshHandlers  map[string]uint64 // key: "namespace/name" -> handler ID
 
 	runRouterScriptFn        func(context.Context, *networkv1alpha1.PublicIPClaim, string, string) (string, error)
 	ensureIPInPoolFn         func(context.Context, string, string) error
@@ -76,6 +78,7 @@ type PublicIPClaimReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
+// nolint:gocyclo // Reconcile function is inherently complex due to multiple phases
 func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
@@ -129,6 +132,56 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		// Return to trigger a new reconcile with the finalizer present
 		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+
+	// Handle router SSH events (Phase 2: automatic reconciliation on reboot/reconnect)
+	if eventTime, ok := claim.Annotations["network.serialx.net/last-router-event"]; ok {
+		eventReason := claim.Annotations["network.serialx.net/last-router-event-reason"]
+
+		log.Info("router SSH event detected, verifying state",
+			"eventTime", eventTime,
+			"eventReason", eventReason,
+			"wanInterface", claim.Status.WanInterface)
+
+		// Get SSH manager to verify state
+		mgr, err := r.getSSHManager(ctx, &claim)
+		if err != nil {
+			log.Error(err, "failed to get SSH manager for verification")
+		} else if claim.Status.WanInterface != "" {
+			// Verify interface state after router event
+			verifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+
+			exists, err := mgr.InterfaceExists(verifyCtx, claim.Status.WanInterface)
+			if err != nil || !exists {
+				log.Info("interface missing after router event, re-provisioning",
+					"interface", claim.Status.WanInterface,
+					"eventReason", eventReason)
+
+				// Clear status to trigger re-provisioning
+				claim.Status.Phase = networkv1alpha1.ClaimPhasePending
+				claim.Status.Message = fmt.Sprintf("Re-provisioning after %s", eventReason)
+				claim.Status.WanInterface = ""
+				claim.Status.AssignedIP = ""
+				if err := r.Status().Update(ctx, &claim); err != nil {
+					log.Error(err, "failed to update status for re-provisioning")
+					return ctrl.Result{}, err
+				}
+			} else {
+				log.Info("interface exists after router event, state OK",
+					"interface", claim.Status.WanInterface)
+			}
+		}
+
+		// Clear event annotations after handling
+		delete(claim.Annotations, "network.serialx.net/last-router-event")
+		delete(claim.Annotations, "network.serialx.net/last-router-event-reason")
+		if err := r.Update(ctx, &claim); err != nil {
+			log.Error(err, "failed to clear event annotations")
+		}
+
+		// Re-queue to continue reconciliation
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Skip if already successfully assigned
@@ -467,6 +520,7 @@ func coalesceInt(a, b int) int {
 }
 
 // Helper: update status to failed state
+// nolint:unparam // ctrl.Result is intentionally always zero for consistent signature
 func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, err error) (ctrl.Result, error) {
 	claim.Status.Phase = networkv1alpha1.ClaimPhaseFailed
 	claim.Status.Message = err.Error()
@@ -477,7 +531,7 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alph
 }
 
 // getSSHManager retrieves or creates an SSH manager for the claim's router.
-// Phase 1: Returns manager without event handler registration (event handlers come in Phase 2).
+// Phase 2: Registers event handlers with deduplication to enable automatic reconciliation.
 func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) (*sshpkg.SSHConnectionManager, error) {
 	log := ctrllog.FromContext(ctx)
 
@@ -525,6 +579,57 @@ func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *netw
 			log.Info("SSH manager started", "router", addr)
 		}
 	}
+
+	// Register event handler with deduplication (Phase 2)
+	handlerKey := fmt.Sprintf("%s/%s", claim.Namespace, claim.Name)
+
+	r.sshHandlerMu.Lock()
+	if _, exists := r.sshHandlers[handlerKey]; !exists {
+		// Only register if not already registered (prevents memory leaks)
+		handlerID := mgr.RegisterHandler(func(event sshpkg.Event) {
+			// CRITICAL: Use background context, not parent context
+			// Handler may fire after reconciliation completes
+			bgCtx := context.Background()
+
+			log.Info("Router SSH event detected",
+				"router", addr,
+				"reason", event.Reason,
+				"claim", handlerKey)
+
+			// Trigger reconciliation by updating claim annotation
+			var updatedClaim networkv1alpha1.PublicIPClaim
+			if err := r.Get(bgCtx, client.ObjectKey{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+			}, &updatedClaim); err != nil {
+				log.Error(err, "failed to get claim in event handler", "claim", handlerKey)
+				return
+			}
+
+			if updatedClaim.Annotations == nil {
+				updatedClaim.Annotations = make(map[string]string)
+			}
+			updatedClaim.Annotations["network.serialx.net/last-router-event"] = time.Now().Format(time.RFC3339)
+			updatedClaim.Annotations["network.serialx.net/last-router-event-reason"] = string(event.Reason)
+
+			if err := r.Update(bgCtx, &updatedClaim); err != nil {
+				log.Error(err, "failed to update claim annotations in event handler", "claim", handlerKey)
+			} else {
+				log.V(1).Info("claim annotations updated, reconciliation will be triggered",
+					"claim", handlerKey,
+					"reason", event.Reason)
+			}
+		})
+
+		r.sshHandlers[handlerKey] = handlerID
+		log.Info("registered SSH event handler",
+			"claim", handlerKey,
+			"handlerID", handlerID,
+			"router", addr)
+	} else {
+		log.V(1).Info("SSH event handler already registered, skipping", "claim", handlerKey)
+	}
+	r.sshHandlerMu.Unlock()
 
 	return mgr, nil
 }
@@ -596,8 +701,34 @@ func (r *PublicIPClaimReconciler) defaultCleanupRouterInterface(ctx context.Cont
 	}
 
 checkManagerLifecycle:
-	// Phase 1: No event handlers yet, so we don't manage lifecycle based on handler count
-	// In Phase 2, we'll add handler tracking and close managers when unused
+	// Phase 2: Unregister event handler and manage SSH manager lifecycle
+	handlerKey := fmt.Sprintf("%s/%s", claim.Namespace, claim.Name)
+
+	r.sshHandlerMu.Lock()
+	if handlerID, exists := r.sshHandlers[handlerKey]; exists {
+		mgr.UnregisterHandler(handlerID)
+		delete(r.sshHandlers, handlerKey)
+		log.Info("unregistered SSH event handler",
+			"claim", handlerKey,
+			"handlerID", handlerID)
+	}
+	r.sshHandlerMu.Unlock()
+
+	// If no more handlers registered for this manager, close it
+	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
+	if mgr.HandlerCount() == 0 {
+		log.Info("no more claims using this router, closing SSH manager", "router", addr)
+		if err := mgr.Close(); err != nil {
+			log.Error(err, "failed to close SSH manager", "router", addr)
+		}
+		r.SSHRegistry.Remove(addr)
+		log.Info("SSH manager removed from registry", "router", addr)
+	} else {
+		log.V(1).Info("SSH manager still in use by other claims",
+			"router", addr,
+			"handlerCount", mgr.HandlerCount())
+	}
+
 	log.V(1).Info("cleanup complete", "interface", claim.Status.WanInterface)
 
 	return nil
@@ -605,6 +736,11 @@ checkManagerLifecycle:
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PublicIPClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize SSH event handler tracking map
+	if r.sshHandlers == nil {
+		r.sshHandlers = make(map[string]uint64)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1alpha1.PublicIPClaim{}).
 		Named("publicipclaim").

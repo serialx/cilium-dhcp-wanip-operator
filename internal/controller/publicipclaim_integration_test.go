@@ -117,6 +117,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		Dynamic:     dynClient,
 		Scheme:      scheme,
 		SSHRegistry: sshpkg.NewRegistry(),
+		sshHandlers: make(map[string]uint64),
 	}
 
 	claim := &networkv1alpha1.PublicIPClaim{
@@ -194,6 +195,7 @@ func TestPublicIPClaimReconcilerMockSSHIntegration(t *testing.T) {
 		Dynamic:     dynClient,
 		Scheme:      scheme,
 		SSHRegistry: sshpkg.NewRegistry(),
+		sshHandlers: make(map[string]uint64),
 	}
 
 	res, err = deleteReconciler.Reconcile(ctx, req)
