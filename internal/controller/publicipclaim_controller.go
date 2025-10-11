@@ -742,6 +742,11 @@ func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *n
 func (r *PublicIPClaimReconciler) getSSHManager(ctx context.Context, claim *networkv1alpha1.PublicIPClaim) (*sshpkg.SSHConnectionManager, error) {
 	log := ctrllog.FromContext(ctx)
 
+	// Guard against nil SSH registry (defensive programming)
+	if r.SSHRegistry == nil {
+		return nil, fmt.Errorf("SSH registry not initialized")
+	}
+
 	// Get SSH credentials from secret
 	sec := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
