@@ -46,6 +46,11 @@ NEW_IP=$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{print $2}' | cut -d/ -f1 |
 # Extract CIDR suffix for cleanup
 NEW_IP_CIDR=$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{print $2}' | head -n1)
 
+# 3.5) Send gratuitous ARP to announce IP ownership to ISP gateway
+#      Critical for same-subnet IPs - updates ISP's ARP cache with correct MAC
+arping -U -I "$WAN_IF" -S "$NEW_IP" -c 3 "$NEW_IP" >/dev/null 2>&1 || true
+sleep 1
+
 # 4) Remove the IP from the interface - we only need the DHCP lease, not the binding!
 #    If the IP stays on the interface, the kernel creates a local route that conflicts with BGP.
 #    We want BGP to handle routing to K8s, not have a local route on the WAN interface.
