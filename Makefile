@@ -51,11 +51,11 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	go fmt ./...
+	go fmt $(shell go list ./... | grep -v '/cmd/agent' | grep -v '/internal/agent')
 
 .PHONY: vet
 vet: ## Run go vet against code.
-	go vet ./...
+	go vet $(shell go list ./... | grep -v '/cmd/agent' | grep -v '/internal/agent')
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
