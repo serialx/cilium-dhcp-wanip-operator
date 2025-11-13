@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Kubernetes operator built with Kubebuilder that manages public IP addresses obtained via DHCP from an ISP router and integrates them with Cilium's LoadBalancer IP pools. The operator enables allocating multiple public IPs by creating macvlan interfaces on a router (e.g., UDM-Pro) and using Cilium BGP for routing.
 
-**Key Architecture:**
-- **Router Script**: Creates macvlan interfaces, obtains DHCP leases, configures proxy ARP, and unbinds IPs from interfaces to avoid BGP conflicts
-- **Operator**: SSH into router, run script, add allocated IPs to CiliumLoadBalancerIPPool CRDs
+**Key Architecture (v0.3.2+):**
+- **Router Agent**: Dedicated HTTP API service (systemd) running on router for DHCP lease management
+- **Operator**: Communicates with agent via SSH tunnel (HTTP API), adds allocated IPs to CiliumLoadBalancerIPPool CRDs
 - **Cilium BGP**: Advertises routes from K8s cluster to router dynamically (no static routes)
 - **Traffic Flow**: Internet → Router WAN (proxy ARP) → Router BGP routing table → K8s via LAN → Cilium LoadBalancer
 
@@ -16,15 +16,20 @@ This is a Kubernetes operator built with Kubebuilder that manages public IP addr
 - Each public IP requires a unique MAC address (DHCP limitation)
 - IPs are unbound from WAN interfaces after DHCP lease to prevent local route conflicts with BGP
 - `rp_filter=0` required on WAN interfaces (asymmetric routing: packets arrive on WAN, route via LAN)
-- udhcpc daemon runs in background to maintain DHCP lease renewals
+- Agent manages DHCP renewal via unicast raw sockets (no broadcast storms)
+- Agent tracks lease status, renewal count, and interface state
 
 ## Architecture Reference
 
-**SPEC.md is the source of truth** for this project's complete architecture, router script implementation, CRD schema, controller logic, and deployment. Always consult SPEC.md when implementing or modifying functionality.
+**SPEC.md is the source of truth** for this project's complete architecture, CRD schema, controller logic, and deployment. Always consult SPEC.md when implementing or modifying functionality.
+
+**ROUTER_AGENT_DESIGN.md** (v0.3.2+) documents the router agent HTTP API design, lease management, and systemd service configuration.
 
 ## Development Commands
 
 ### Building and Running
+
+**Operator:**
 ```bash
 # Build the operator binary
 make build
@@ -37,6 +42,23 @@ make docker-build IMG=<registry>/cilium-dhcp-wanip-operator:tag
 
 # Push Docker image
 make docker-push IMG=<registry>/cilium-dhcp-wanip-operator:tag
+
+# Multi-platform build (recommended)
+make docker-buildx IMG=<registry>/cilium-dhcp-wanip-operator:tag
+```
+
+**Router Agent (v0.3.2+):**
+```bash
+# Build agent for Linux ARM64 (UDM-Pro)
+GOOS=linux GOARCH=arm64 go build -o dhcp-wan-agent cmd/agent/main.go
+
+# Build agent for Linux AMD64
+GOOS=linux GOARCH=amd64 go build -o dhcp-wan-agent cmd/agent/main.go
+
+# Deploy to router
+scp dhcp-wan-agent root@router:/data/dhcp-wan-agent/bin/
+scp deploy/agent/dhcp-wan-agent.service root@router:/etc/systemd/system/
+ssh root@router systemctl enable --now dhcp-wan-agent
 ```
 
 ### Code Generation
@@ -196,10 +218,19 @@ make build  # Ensure the operator builds successfully
 
 ## Important Implementation Notes
 
-- **SSH to Router**: Controller needs `golang.org/x/crypto/ssh` to execute scripts on router
+**v0.3.2+ Router Agent:**
+- **Agent Communication**: Controller uses `internal/router.AgentClient` to communicate with router agent via SSH tunnel
+- **HTTP API**: Agent exposes `/leases` endpoints (POST=allocate, GET=status, DELETE=release)
+- **Structured Responses**: Agent returns JSON instead of shell script output
+- **Automatic Renewal**: Agent handles DHCP renewal via raw sockets (unicast, not broadcast)
+- **Lease Tracking**: Agent tracks renewal count and lease status
+- **Systemd Service**: Agent runs as systemd service on router for automatic restart
+
+**Core Implementation:**
+- **SSH to Router**: Controller needs `golang.org/x/crypto/ssh` to establish SSH tunnels to agent
 - **Dynamic Client**: Use `k8s.io/client-go/dynamic` to interact with Cilium CRDs (support both `cilium.io/v2` and `cilium.io/v2alpha1`)
 - **Secrets**: Router SSH keys stored in K8s secrets (namespace: `kube-system`, secret key: `id_rsa`)
 - **MAC Generation**: Auto-generate locally-administered MACs (`02:xx:xx:xx:xx:xx`) if not specified
 - **Interface Naming**: Linux interface names limited to 15 chars; sanitize claim names appropriately
-- **Finalizers**: Essential for cleanup - must kill udhcpc daemon, remove proxy ARP, delete interface
-- **Router Reboots**: Macvlan interfaces and DHCP daemons do NOT survive router reboots (requires manual recovery or systemd units)
+- **Finalizers**: Essential for cleanup - agent releases lease gracefully via API
+- **Router Reboots**: Agent detects stale leases after reboot and marks them as "stale"

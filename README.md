@@ -6,29 +6,30 @@ A Kubernetes operator that dynamically allocates public IP addresses from your I
 
 This operator bridges the gap between ISP-provided DHCP addresses and Kubernetes LoadBalancer services. It:
 
-1. **Allocates Public IPs**: SSHes into your router (UDM-Pro, pfSense, etc.) to create macvlan interfaces and obtain DHCP leases
-2. **Updates Cilium Pools**: Automatically adds allocated IPs to CiliumLoadBalancerIPPool resources
-3. **Manages Lifecycle**: Handles cleanup when IPs are released, including stopping DHCP daemons and removing router interfaces
-4. **Integrates with BGP**: Works with Cilium BGP to advertise routes dynamically (no static routes needed)
+1. **Router Agent**: Runs a dedicated HTTP API agent on your router (UDM-Pro, pfSense, etc.) for reliable DHCP lease management
+2. **Allocates Public IPs**: Creates macvlan interfaces and obtains DHCP leases via the agent API over SSH tunnel
+3. **Updates Cilium Pools**: Automatically adds allocated IPs to CiliumLoadBalancerIPPool resources
+4. **Manages Lifecycle**: Handles cleanup when IPs are released with graceful lease termination
+5. **Integrates with BGP**: Works with Cilium BGP to advertise routes dynamically (no static routes needed)
 
 Perfect for homelabs where you have limited public IPs but want proper LoadBalancer support for services like Ingress controllers, game servers, or VPN endpoints
 
 ## How It Works
 
 ```
-┌─────────────┐     SSH      ┌──────────────┐
-│  Operator   │─────────────>│    Router    │
-│   (K8s)     │              │  (UDM/etc)   │
+┌─────────────┐  SSH Tunnel  ┌──────────────┐
+│  Operator   │─────────────>│ Router Agent │
+│   (K8s)     │   HTTP API   │  (systemd)   │
 └─────────────┘              └──────────────┘
       │                             │
-      │ 1. Create macvlan           │ 2. DHCP lease
-      │    interface                │    from ISP
+      │ 1. AllocateLease()          │ 2. Create macvlan
+      │    via agent API            │    + DHCP lease
       │                             │
-      │ 3. Configure                │ 4. Proxy ARP
-      │    proxy ARP                │    enabled
+      │ 3. GetLease()               │ 4. Track renewals
+      │    verify status            │    + proxy ARP
       │                             │
-      │ 5. Add IP to Pool           │
-      v                             v
+      │ 5. Add IP to Pool           │ 6. Unicast DHCP
+      v                             v    renewal
 ┌─────────────┐              ┌──────────────┐
 │   Cilium    │<─── BGP ────>│  WAN/ISP     │
 │  IP Pool    │              │  Network     │
@@ -36,6 +37,8 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 ```
 
 **Traffic Flow**: Internet → Router WAN (proxy ARP) → Router BGP table → K8s via LAN → Cilium LoadBalancer → Service
+
+**v0.3.2+ uses a dedicated router agent** that replaces SSH scripts with an HTTP API for better reliability and structured error handling.
 
 ## Quick Start
 
@@ -55,35 +58,54 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 
 **Option A: Quick Install (Recommended - Uses pre-built images)**
 
-Deploy the operator directly from the release manifest:
+**1. Deploy the operator:**
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
 ```
 
 This will:
 - Create the `cilium-dhcp-wanip-operator-system` namespace
 - Install the `PublicIPClaim` CRD
-- Deploy the operator controller with image `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0`
+- Deploy the operator controller with image `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.2`
 - Set up necessary RBAC permissions
 
-Verify the installation:
+**2. Install the router agent (v0.3.2+):**
+
+The router agent is a systemd service that runs on your router. Download and install:
 
 ```bash
-kubectl get pods -n cilium-dhcp-wanip-operator-system
-# You should see the controller manager pod running
+# Download the agent binary for your router architecture
+# For UDM-Pro (ARM64):
+wget https://github.com/serialx/cilium-dhcp-wanip-operator/releases/download/v0.3.2/dhcp-wan-agent-linux-arm64
+ssh root@192.168.1.1 "mkdir -p /data/dhcp-wan-agent/bin"
+scp dhcp-wan-agent-linux-arm64 root@192.168.1.1:/data/dhcp-wan-agent/bin/dhcp-wan-agent
+ssh root@192.168.1.1 "chmod +x /data/dhcp-wan-agent/bin/dhcp-wan-agent"
+
+# Install systemd service
+curl -O https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/deploy/agent/dhcp-wan-agent.service
+scp dhcp-wan-agent.service root@192.168.1.1:/etc/systemd/system/
+ssh root@192.168.1.1 "systemctl enable --now dhcp-wan-agent"
+```
+
+Verify the agent is running:
+
+```bash
+ssh root@192.168.1.1 systemctl status dhcp-wan-agent
 ```
 
 **Option B: Build and Deploy from Source**
 
-**1. Install the router script**
-
-Copy the allocation script to your router:
+**1. Build and install the router agent:**
 
 ```bash
-scp config/samples/router-script-example.sh root@192.168.1.1:/data/cilium-dhcp-wanip-operator/alloc_public_ip.sh
-# /data path is persistent on UDM Pro routers UniFi OS 2+
-ssh root@192.168.1.1 "chmod +x /data/cilium-dhcp-wanip-operator/alloc_public_ip.sh"
+# Build agent for your router architecture
+GOOS=linux GOARCH=arm64 go build -o dhcp-wan-agent cmd/agent/main.go
+
+# Deploy to router
+scp dhcp-wan-agent root@192.168.1.1:/data/dhcp-wan-agent/bin/
+scp deploy/agent/dhcp-wan-agent.service root@192.168.1.1:/etc/systemd/system/
+ssh root@192.168.1.1 "systemctl enable --now dhcp-wan-agent"
 ```
 
 **2. Create SSH secret**
@@ -163,7 +185,15 @@ kubectl get publicipclaims
 
 ## Key Features
 
-- ✅ **Automatic IP Allocation**: Creates macvlan interfaces and obtains DHCP leases via SSH
+**v0.3.2+ Router Agent Integration:**
+- ✅ **HTTP API Agent**: Dedicated systemd service on router with structured JSON responses
+- ✅ **Automatic DHCP Renewal**: Agent tracks and renews leases automatically via unicast (no broadcast storms!)
+- ✅ **Graceful Cleanup**: Proper lease release via agent API on deletion
+- ✅ **Renewal Tracking**: Monitor DHCP renewal count in claim status
+- ✅ **SSH Tunnel Security**: All agent communication over SSH tunnel
+
+**Core Features:**
+- ✅ **Automatic IP Allocation**: Creates macvlan interfaces and obtains DHCP leases
 - ✅ **Cilium Integration**: Updates CiliumLoadBalancerIPPool with allocated IPs
 - ✅ **BGP-Ready**: Works with Cilium BGP for dynamic route advertisement
 - ✅ **Proxy ARP**: Configures router to answer ARP for allocated IPs
@@ -171,9 +201,9 @@ kubectl get publicipclaims
 - ✅ **MAC Generation**: Auto-generates unique MAC addresses for each claim
 - ✅ **API Version Detection**: Supports both Cilium v2 and v2alpha1 APIs
 - ✅ **Status Tracking**: Full status reporting with phase, IP, interface, and MAC
-- ✅ **Automatic Reboot Recovery**: Detects router reboots and automatically restores configuration (~40s)
+- ✅ **Automatic Reboot Recovery**: Detects router reboots and automatically restores configuration
 - ✅ **SSH Connection Pooling**: Efficient connection management with automatic reconnection
-- ✅ **Periodic Verification**: Validates router state every 60 minutes to detect configuration drift
+- ✅ **Periodic Verification**: Validates router state every 60 minutes via agent API
 - ✅ **Event-Driven Reconciliation**: Reacts immediately to connection drops and router state changes
 
 ## Examples
@@ -217,11 +247,14 @@ spec:
 ## Architecture Details
 
 See [SPEC.md](SPEC.md) for complete architecture documentation including:
-- Router script implementation (proxy ARP + Cilium BGP)
+- Router agent HTTP API design (v0.3.2+)
+- Router script implementation (proxy ARP + Cilium BGP) - legacy
 - CRD schema and validation
 - Controller reconciliation logic
 - Finalizer cleanup process
 - Networking details (rp_filter, BGP routing, etc.)
+
+See [ROUTER_AGENT_DESIGN.md](ROUTER_AGENT_DESIGN.md) for router agent implementation details (v0.3.2+)
 
 ## Development
 
@@ -271,45 +304,56 @@ When you're ready to release a new version:
 The GitHub Actions workflow automatically builds and pushes images when you create a tag:
 
 ```bash
-git tag -a v0.2.0 -m "Release v0.2.0 - Description of changes"
-git push origin v0.2.0
+git tag -a v0.3.2 -m "Release v0.3.2 - Description of changes"
+git push origin v0.3.2
 ```
 
-This will trigger the CI to build multi-platform images and push to `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0`
+This will trigger the CI to build multi-platform images and push to `ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.2`
 
-**2. Generate the installer manifest**
+**2. Build and release the router agent**
+
+Build agent binaries for multiple architectures:
+
+```bash
+# Build for common platforms
+GOOS=linux GOARCH=arm64 go build -o dhcp-wan-agent-linux-arm64 cmd/agent/main.go
+GOOS=linux GOARCH=amd64 go build -o dhcp-wan-agent-linux-amd64 cmd/agent/main.go
+```
+
+**3. Generate the installer manifest**
 
 After the CI completes, update the installer manifest with the new image:
 
 ```bash
-make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.2.0
+make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.2
 ```
 
-This updates `dist/install.yaml` with the new image tag.
+This updates `config/install.yaml` with the new image tag.
 
-**3. Commit and push the installer**
+**4. Commit and push the installer**
 
 ```bash
-git add dist/install.yaml config/manager/kustomization.yaml
-git commit -m "chore: update installer manifest for v0.2.0"
+git add config/install.yaml config/manager/kustomization.yaml
+git commit -m "chore: update installer manifest for v0.3.2"
 git push origin main
 ```
 
-**4. Create a GitHub Release**
+**5. Create a GitHub Release**
 
 ```bash
-gh release create v0.2.0 \
-  --title "v0.2.0" \
+gh release create v0.3.2 \
+  --title "v0.3.2 - Router Agent HTTP API Integration" \
   --notes "Release notes here" \
-  dist/install.yaml
+  dhcp-wan-agent-linux-arm64 \
+  dhcp-wan-agent-linux-amd64
 ```
 
-Or create it manually in the GitHub UI and attach `dist/install.yaml`.
+Or create it manually in the GitHub UI and attach the agent binaries.
 
 **Users can then install the new version:**
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.0/dist/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
 ```
 
 ## Uninstall
@@ -321,7 +365,11 @@ kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-ope
 kubectl delete publicipclaims --all
 
 # Remove the operator
-kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.2.0/dist/install.yaml
+kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
+
+# Stop and remove the router agent
+ssh root@192.168.1.1 "systemctl disable --now dhcp-wan-agent"
+ssh root@192.168.1.1 "rm -f /etc/systemd/system/dhcp-wan-agent.service"
 ```
 
 **If installed from source (Option B):**
