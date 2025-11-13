@@ -298,7 +298,7 @@ func (c *AgentClient) ReleaseLease(ctx context.Context, iface string) error {
 	if err != nil {
 		return fmt.Errorf("agent request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		// Already released
@@ -307,7 +307,7 @@ func (c *AgentClient) ReleaseLease(ctx context.Context, iface string) error {
 
 	if resp.StatusCode != http.StatusNoContent {
 		var errResp ErrorResponse
-		json.NewDecoder(resp.Body).Decode(&errResp)
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
 		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, errResp.Error)
 	}
 

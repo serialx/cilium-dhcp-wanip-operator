@@ -204,7 +204,7 @@ func (c *Client) ReleaseLease(ctx context.Context, currentIP, dhcpServerIP net.I
 	if err != nil {
 		return fmt.Errorf("failed to create DHCP client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Construct a minimal Lease object with ACK to use library's Release() method
 	// The library's Release() sends via WriteTo() which doesn't wait for response
