@@ -42,6 +42,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	networkv1alpha1 "serialx.net/cilium-dhcp-wanip-operator/api/v1alpha1"
+	"serialx.net/cilium-dhcp-wanip-operator/internal/router"
 	sshpkg "serialx.net/cilium-dhcp-wanip-operator/internal/ssh"
 )
 
@@ -260,12 +261,10 @@ func (r *PublicIPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		// Verification passed, update status
-		if err := r.Status().Update(ctx, &claim); err != nil {
-			log.Error(err, "failed to update status after verification")
-			// Return nil error to respect RequeueAfter (non-nil error causes immediate retry with backoff)
-			return ctrl.Result{RequeueAfter: 60 * time.Minute}, nil
-		}
+		// Verification passed - DO NOT update status here to avoid reconcile loops
+		// The verification function already updated in-memory status, but we intentionally
+		// don't persist it to avoid triggering another reconcile event
+		// Status will be persisted on next significant change (failure/recovery)
 
 		log.V(1).Info("Periodic verification passed, requeueing", "ip", claim.Status.AssignedIP)
 		// Requeue for next periodic check (60 minutes)
@@ -404,52 +403,57 @@ func (r *PublicIPClaimReconciler) runRouterScript(ctx context.Context, claim *ne
 func (r *PublicIPClaimReconciler) defaultRunRouterScript(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, wanIf, macAddr string) (string, error) {
 	log := ctrllog.FromContext(ctx)
 
-	// Get SSH manager for this router (connection pooling)
-	log.V(1).Info("getting SSH manager", "router", claim.Spec.Router.Host)
-	mgr, err := r.getSSHManager(ctx, claim)
-	if err != nil {
-		return "", err
+	// Get SSH credentials for agent client
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+		return "", fmt.Errorf("failed to get SSH secret: %w", err)
 	}
 
-	// Build command with environment variables
-	cmd := fmt.Sprintf("export WAN_PARENT=%q WAN_IF=%q WAN_MAC=%q && %s",
-		claim.Spec.Router.WanParent, wanIf, macAddr, claim.Spec.Router.Command)
+	key := sec.Data["id_rsa"]
+	if len(key) == 0 {
+		return "", fmt.Errorf("ssh private key not found in secret %s/id_rsa", claim.Spec.Router.SSHSecretRef)
+	}
 
-	log.Info("executing router script via SSH manager",
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse SSH private key: %w", err)
+	}
+
+	// Create SSH config for agent client
+	sshConfig := &ssh.ClientConfig{
+		User: claim.Spec.Router.User,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+
+	log.Info("connecting to router agent via SSH tunnel",
 		"router", claim.Spec.Router.Host,
-		"script", claim.Spec.Router.Command,
 		"wanParent", claim.Spec.Router.WanParent,
 		"wanInterface", wanIf,
 		"macAddress", macAddr)
 
-	// Execute command via SSH manager with timeout
-	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Create agent client (establishes SSH tunnel)
+	agentClient, err := router.NewAgentClient(ctx, claim.Spec.Router.Host, sshConfig)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to router agent: %w", err)
+	}
+	defer agentClient.Close()
+
+	log.Info("allocating lease via router agent")
+
+	// Allocate lease via agent API with timeout
+	allocCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	output, err := mgr.RunCommand(cmdCtx, cmd)
+	ip, err := agentClient.AllocateLease(allocCtx, wanIf, claim.Spec.Router.WanParent, macAddr)
 	if err != nil {
-		return "", fmt.Errorf("router script failed: %w", err)
+		return "", fmt.Errorf("agent lease allocation failed: %w", err)
 	}
 
-	log.V(1).Info("script output received", "lines", len(strings.Split(string(output), "\n")))
-
-	// Extract the last non-empty line as the IP address
-	// This allows the script to output debug information on earlier lines
-	lines := strings.Split(string(output), "\n")
-	var ip string
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line != "" {
-			ip = line
-			break
-		}
-	}
-
-	if ip == "" {
-		return "", fmt.Errorf("router script produced no output")
-	}
-
-	log.Info("router script completed successfully", "ip", ip)
+	log.Info("lease allocated successfully via agent", "ip", ip)
 	return ip, nil
 }
 
@@ -635,6 +639,81 @@ func (r *PublicIPClaimReconciler) fail(ctx context.Context, claim *networkv1alph
 func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *networkv1alpha1.PublicIPClaim, sshMgr *sshpkg.SSHConnectionManager) error {
 	log := ctrllog.FromContext(ctx)
 
+	// NEW: Try to verify using agent API first, fall back to SSH commands
+	ifname := claim.Status.WanInterface
+	if ifname == "" {
+		log.V(1).Info("interface not yet created")
+		return fmt.Errorf("interface not yet created")
+	}
+
+	// Get SSH credentials for agent client
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err == nil {
+		key := sec.Data["id_rsa"]
+		if len(key) > 0 {
+			signer, err := ssh.ParsePrivateKey(key)
+			if err == nil {
+				// Try agent-based verification
+				sshConfig := &ssh.ClientConfig{
+					User:            claim.Spec.Router.User,
+					Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+					Timeout:         30 * time.Second,
+				}
+
+				agentClient, err := router.NewAgentClient(ctx, claim.Spec.Router.Host, sshConfig)
+				if err == nil {
+					defer agentClient.Close()
+
+					verifyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+
+					leaseStatus, err := agentClient.GetLease(verifyCtx, ifname)
+					if err == nil && leaseStatus != nil {
+						// Agent verification successful
+						log.V(1).Info("lease status retrieved via agent",
+							"interface", ifname,
+							"status", leaseStatus.Status,
+							"interfaceExists", leaseStatus.InterfaceExists,
+							"renewalCount", leaseStatus.RenewalCount)
+
+						// Check if lease is stale or interface missing
+						if leaseStatus.Status == "stale" || !leaseStatus.InterfaceExists {
+							log.Info("Lease is stale or interface missing (agent verification)",
+								"interface", ifname,
+								"status", leaseStatus.Status)
+							r.Recorder.Event(claim, "Warning", "ConfigurationDrift", "Lease stale or interface missing")
+							claim.Status.LastReconciliationReason = "lease_stale"
+							return fmt.Errorf("lease stale or interface missing")
+						}
+
+						// All checks passed via agent
+						// Don't update timestamps to avoid reconcile loops (status not persisted anyway)
+						claim.Status.ConfigurationVerified = true
+						claim.Status.LastReconciliationReason = "verified_via_agent"
+
+						// Update condition (but won't be persisted to avoid reconcile loop)
+						meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+							Type:               networkv1alpha1.ConditionReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             "ConfigurationVerified",
+							Message:            fmt.Sprintf("Lease verified via agent (renewals: %d)", leaseStatus.RenewalCount),
+							ObservedGeneration: claim.Generation,
+						})
+
+						log.V(1).Info("State verification passed via agent", "interface", ifname)
+						return nil
+					}
+					// Agent verification failed, fall back to SSH commands
+					log.V(1).Info("agent verification failed, falling back to SSH commands", "error", err)
+				}
+			}
+		}
+	}
+
+	// FALLBACK: Use legacy SSH command-based verification
+	log.V(1).Info("using SSH command-based verification")
+
 	// 1. Check router uptime (detect reboots)
 	uptime, err := sshMgr.GetRouterUptime(ctx)
 	if err != nil {
@@ -656,13 +735,6 @@ func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *n
 	claim.Status.RouterUptime = currentUptime
 
 	// 2. Verify interface exists
-	ifname := claim.Status.WanInterface
-	if ifname == "" {
-		// Interface not yet created, need full reconciliation
-		log.V(1).Info("interface not yet created")
-		return fmt.Errorf("interface not yet created")
-	}
-
 	exists, err := sshMgr.InterfaceExists(ctx, ifname)
 	if err != nil {
 		log.Error(err, "failed to check interface existence", "interface", ifname)
@@ -719,12 +791,11 @@ func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *n
 	}
 
 	// All checks passed
-	now := metav1.Now()
-	claim.Status.LastVerified = &now
+	// Don't update timestamps to avoid reconcile loops (status not persisted anyway)
 	claim.Status.ConfigurationVerified = true
 	claim.Status.LastReconciliationReason = "verified"
 
-	// Update condition
+	// Update condition (but won't be persisted to avoid reconcile loop)
 	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               networkv1alpha1.ConditionReady,
 		Status:             metav1.ConditionTrue,
@@ -930,64 +1001,71 @@ func (r *PublicIPClaimReconciler) defaultCleanupRouterInterface(ctx context.Cont
 		return nil
 	}
 
-	// Try to get SSH manager - it might not exist if router was never reached
-	mgr, err := r.getSSHManager(ctx, claim)
-	if err != nil {
-		log.Info("cannot get SSH manager for cleanup, skipping", "error", err.Error())
-		return nil
+	// Get SSH credentials for agent client
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.Router.SSHSecretRef, Namespace: "kube-system"}, sec); err != nil {
+		log.Info("cannot get SSH secret for cleanup, skipping", "error", err.Error())
+		return nil // Best effort cleanup
 	}
 
-	// Check if interface exists before cleanup (using command helper)
-	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	key := sec.Data["id_rsa"]
+	if len(key) == 0 {
+		log.Info("ssh private key not found in secret for cleanup, skipping")
+		return nil // Best effort cleanup
+	}
+
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		log.Info("failed to parse SSH private key for cleanup, skipping", "error", err.Error())
+		return nil // Best effort cleanup
+	}
+
+	// Create SSH config for agent client
+	sshConfig := &ssh.ClientConfig{
+		User: claim.Spec.Router.User,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+
+	log.Info("connecting to router agent for cleanup", "interface", claim.Status.WanInterface)
+
+	// Create agent client (establishes SSH tunnel)
+	agentClient, err := router.NewAgentClient(ctx, claim.Spec.Router.Host, sshConfig)
+	if err != nil {
+		log.Info("cannot connect to router agent for cleanup, skipping", "error", err.Error())
+		return nil // Best effort cleanup
+	}
+	defer agentClient.Close()
+
+	// Release lease via agent API with timeout
+	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	exists, err := mgr.InterfaceExists(cleanupCtx, claim.Status.WanInterface)
-	if err != nil {
-		log.Error(err, "failed to check interface existence", "interface", claim.Status.WanInterface)
-	} else if !exists {
-		log.Info("interface does not exist, skipping cleanup", "interface", claim.Status.WanInterface)
-		goto checkManagerLifecycle
+	log.Info("releasing lease via router agent", "interface", claim.Status.WanInterface)
+
+	if err := agentClient.ReleaseLease(cleanupCtx, claim.Status.WanInterface); err != nil {
+		log.Error(err, "agent lease release failed, continuing with cleanup")
+		// Continue anyway - best effort cleanup
+	} else {
+		log.Info("lease released successfully via agent", "interface", claim.Status.WanInterface)
 	}
 
-	log.Info("cleaning up router interface", "interface", claim.Status.WanInterface)
-
-	// Execute cleanup commands via SSH manager
-	{
-		// Kill udhcpc daemon, remove proxy ARP, and delete the interface
-		cmd := fmt.Sprintf(`
-			WAN_IF="%s"
-
-			# Kill DHCP client daemon
-			PID_FILE="/var/run/udhcpc.$WAN_IF.pid"
-			if [ -f "$PID_FILE" ]; then
-				kill $(cat "$PID_FILE") 2>/dev/null || true
-				rm -f "$PID_FILE"
-			fi
-
-			# Remove proxy ARP entries
-			ip neigh show proxy dev "$WAN_IF" 2>/dev/null | awk '{print $1}' | while read -r ip; do
-				ip neigh del proxy "$ip" dev "$WAN_IF" 2>/dev/null || true
-			done
-
-			# Delete the interface
-			ip link del "$WAN_IF" 2>/dev/null || true
-		`, claim.Status.WanInterface)
-
-		if _, err := mgr.RunCommand(cleanupCtx, cmd); err != nil {
-			log.Error(err, "cleanup commands failed")
-			// Continue anyway - best effort cleanup
-		} else {
-			log.Info("router interface cleaned up successfully", "interface", claim.Status.WanInterface)
-		}
-	}
-
-checkManagerLifecycle:
 	// Phase 2: Unregister event handler and manage SSH manager lifecycle
 	handlerKey := fmt.Sprintf("%s/%s", claim.Namespace, claim.Name)
 
+	// Get SSH manager from tracking map if it exists
+	r.claimManagersMu.RLock()
+	sshMgr, hasMgr := r.claimManagers[handlerKey]
+	r.claimManagersMu.RUnlock()
+
 	r.sshHandlerMu.Lock()
 	if handlerID, exists := r.sshHandlers[handlerKey]; exists {
-		mgr.UnregisterHandler(handlerID)
+		if hasMgr && sshMgr != nil {
+			sshMgr.UnregisterHandler(handlerID)
+		}
 		delete(r.sshHandlers, handlerKey)
 		log.Info("unregistered SSH event handler",
 			"claim", handlerKey,
@@ -1006,18 +1084,20 @@ checkManagerLifecycle:
 	r.claimManagersMu.Unlock()
 
 	// If no more handlers registered for this manager, close it
-	addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
-	if mgr.HandlerCount() == 0 {
-		log.Info("no more claims using this router, closing SSH manager", "router", addr)
-		if err := mgr.Close(); err != nil {
-			log.Error(err, "failed to close SSH manager", "router", addr)
+	if hasMgr && sshMgr != nil {
+		addr := fmt.Sprintf("%s:%d", claim.Spec.Router.Host, coalesceInt(claim.Spec.Router.Port, 22))
+		if sshMgr.HandlerCount() == 0 {
+			log.Info("no more claims using this router, closing SSH manager", "router", addr)
+			if err := sshMgr.Close(); err != nil {
+				log.Error(err, "failed to close SSH manager", "router", addr)
+			}
+			r.SSHRegistry.Remove(addr)
+			log.Info("SSH manager removed from registry", "router", addr)
+		} else {
+			log.V(1).Info("SSH manager still in use by other claims",
+				"router", addr,
+				"handlerCount", sshMgr.HandlerCount())
 		}
-		r.SSHRegistry.Remove(addr)
-		log.Info("SSH manager removed from registry", "router", addr)
-	} else {
-		log.V(1).Info("SSH manager still in use by other claims",
-			"router", addr,
-			"handlerCount", mgr.HandlerCount())
 	}
 
 	log.V(1).Info("cleanup complete", "interface", claim.Status.WanInterface)
