@@ -1,0 +1,20 @@
+[Unit]
+Description=DHCP WAN Agent
+Documentation=https://github.com/serialx/cilium-dhcp-wanip-operator
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dhcp-wan-agent --listen=127.0.0.1:8080 --state-dir=/var/lib/dhcp-wan-agent --log-level=info
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Allow raw socket operations and network configuration
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

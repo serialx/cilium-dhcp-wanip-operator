@@ -108,6 +108,18 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-agent
+build-agent: fmt ## Build agent binary for router.
+	GOOS=linux GOARCH=arm64 go build -o bin/dhcp-wan-agent cmd/agent/main.go
+
+.PHONY: build-agent-local
+build-agent-local: fmt ## Build agent binary for local testing (Linux only).
+	go build -o bin/dhcp-wan-agent cmd/agent/main.go
+
+.PHONY: install-agent
+install-agent: build-agent ## Install agent to router (requires ROUTER_ADDR env var or default 192.168.1.1).
+	./deploy/agent/install.sh $(ROUTER_ADDR)
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
