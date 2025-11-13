@@ -77,9 +77,7 @@ func (a *Agent) Start(ctx context.Context) error {
 	a.logger.Info("starting DHCP WAN agent")
 
 	// Verify and restore existing leases
-	if err := a.verifyLeases(ctx); err != nil {
-		a.logger.Warn("failed to verify leases", "error", err)
-	}
+	a.verifyLeases(ctx)
 
 	// Start HTTP server
 	go func() {
@@ -263,7 +261,7 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) sendError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(api.ErrorResponse{Error: message})
+	_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: message})
 }
 
 // allocateLease performs the full lease allocation process
@@ -379,7 +377,7 @@ func (a *Agent) releaseLease(ctx context.Context, l *lease.Lease) error {
 }
 
 // verifyLeases verifies and restores leases after agent restart
-func (a *Agent) verifyLeases(ctx context.Context) error {
+func (a *Agent) verifyLeases(ctx context.Context) {
 	leases := a.store.List()
 
 	for _, l := range leases {
@@ -436,8 +434,6 @@ func (a *Agent) verifyLeases(ctx context.Context) error {
 		// Restart renewal loop
 		a.startRenewalLoop(l)
 	}
-
-	return nil
 }
 
 // stopRenewalLoop stops the renewal goroutine for a lease

@@ -25,7 +25,7 @@ func SendGratuitousARP(ifaceName string, ip net.IP, mac net.HardwareAddr, count 
 	if err != nil {
 		return fmt.Errorf("failed to create raw socket: %w", err)
 	}
-	defer syscall.Close(fd)
+	defer func() { _ = syscall.Close(fd) }()
 
 	// Build gratuitous ARP packet
 	packet := buildGratuitousARP(mac, ip)

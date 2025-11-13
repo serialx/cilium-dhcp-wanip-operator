@@ -440,7 +440,7 @@ func (r *PublicIPClaimReconciler) defaultRunRouterScript(ctx context.Context, cl
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to router agent: %w", err)
 	}
-	defer agentClient.Close()
+	defer func() { _ = agentClient.Close() }()
 
 	log.Info("allocating lease via router agent")
 
@@ -663,7 +663,7 @@ func (r *PublicIPClaimReconciler) verifyClaimState(ctx context.Context, claim *n
 
 				agentClient, err := router.NewAgentClient(ctx, claim.Spec.Router.Host, sshConfig)
 				if err == nil {
-					defer agentClient.Close()
+					defer func() { _ = agentClient.Close() }()
 
 					verifyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 					defer cancel()
@@ -1038,7 +1038,7 @@ func (r *PublicIPClaimReconciler) defaultCleanupRouterInterface(ctx context.Cont
 		log.Info("cannot connect to router agent for cleanup, skipping", "error", err.Error())
 		return nil // Best effort cleanup
 	}
-	defer agentClient.Close()
+	defer func() { _ = agentClient.Close() }()
 
 	// Release lease via agent API with timeout
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

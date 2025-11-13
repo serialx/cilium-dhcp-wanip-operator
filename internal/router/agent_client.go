@@ -68,7 +68,7 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 	// 2. Create local listener for tunnel
 	localListener, err := net.Listen("tcp", "127.0.0.1:0") // Random port
 	if err != nil {
-		sshClient.Close()
+		_ = sshClient.Close()
 		return nil, fmt.Errorf("local listen failed: %w", err)
 	}
 
@@ -89,7 +89,7 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 	client.wg.Add(1)
 	go func() {
 		defer client.wg.Done()
-		defer localListener.Close()
+		defer func() { _ = localListener.Close() }()
 
 		for {
 			select {
@@ -99,7 +99,7 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 			}
 
 			// Set accept deadline to periodically check context
-			localListener.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
+			_ = localListener.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
 
 			// Accept connection on localhost
 			localConn, err := localListener.Accept()
@@ -112,14 +112,14 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 
 			// Check if context is cancelled before forwarding
 			if tunnelCtx.Err() != nil {
-				localConn.Close()
+				_ = localConn.Close()
 				return
 			}
 
 			// Dial agent on router's localhost through SSH
 			remoteConn, err := sshClient.Dial("tcp", "127.0.0.1:8692")
 			if err != nil {
-				localConn.Close()
+				_ = localConn.Close()
 				continue
 			}
 
@@ -155,8 +155,8 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 
 // copyConn bidirectionally copies data between two connections
 func copyConn(local, remote net.Conn) {
-	defer local.Close()
-	defer remote.Close()
+	defer func() { _ = local.Close() }()
+	defer func() { _ = remote.Close() }()
 
 	// Bidirectional copy with proper synchronization
 	// Use WaitGroup to avoid premature connection closure causing
@@ -167,20 +167,20 @@ func copyConn(local, remote net.Conn) {
 	// Local → Remote
 	go func() {
 		defer wg.Done()
-		io.Copy(remote, local)
+		_, _ = io.Copy(remote, local)
 		// Signal remote that we're done writing
 		if conn, ok := remote.(*net.TCPConn); ok {
-			conn.CloseWrite()
+			_ = conn.CloseWrite()
 		}
 	}()
 
 	// Remote → Local
 	go func() {
 		defer wg.Done()
-		io.Copy(local, remote)
+		_, _ = io.Copy(local, remote)
 		// Signal local that we're done writing
 		if conn, ok := local.(*net.TCPConn); ok {
-			conn.CloseWrite()
+			_ = conn.CloseWrite()
 		}
 	}()
 
@@ -210,11 +210,11 @@ func (c *AgentClient) AllocateLease(ctx context.Context, iface, wanParent, macAd
 	if err != nil {
 		return "", fmt.Errorf("agent request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		var errResp ErrorResponse
-		json.NewDecoder(resp.Body).Decode(&errResp)
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
 		return "", fmt.Errorf("agent returned %d: %s", resp.StatusCode, errResp.Error)
 	}
 
@@ -238,11 +238,11 @@ func (c *AgentClient) ListLeases(ctx context.Context) ([]LeaseStatus, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp ErrorResponse
-		json.NewDecoder(resp.Body).Decode(&errResp)
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
 		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, errResp.Error)
 	}
 
@@ -266,7 +266,7 @@ func (c *AgentClient) GetLease(ctx context.Context, iface string) (*LeaseStatus,
 	if err != nil {
 		return nil, fmt.Errorf("agent request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -274,7 +274,7 @@ func (c *AgentClient) GetLease(ctx context.Context, iface string) (*LeaseStatus,
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp ErrorResponse
-		json.NewDecoder(resp.Body).Decode(&errResp)
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
 		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, errResp.Error)
 	}
 

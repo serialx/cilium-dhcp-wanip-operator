@@ -32,10 +32,8 @@ func SetupInterface(ifaceName string, ip net.IP, mac net.HardwareAddr) error {
 			Mask: net.CIDRMask(32, 32),
 		},
 	}
-	if err := netlink.AddrDel(link, addr); err != nil {
-		// It's okay if the address wasn't there (EADDRNOTAVAIL or EINVAL)
-		// Just log and continue - the important thing is that the IP is not bound
-	}
+	// It's okay if the address wasn't there - best effort removal
+	_ = netlink.AddrDel(link, addr)
 
 	// 2. Enable proxy ARP
 	proxyARPPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", ifaceName)
@@ -137,7 +135,7 @@ func CreateMacvlan(ifaceName, parentIface string, mac net.HardwareAddr) error {
 	// Bring interface up
 	if err := netlink.LinkSetUp(macvlan); err != nil {
 		// Clean up on failure
-		netlink.LinkDel(macvlan)
+		_ = netlink.LinkDel(macvlan)
 		return fmt.Errorf("failed to bring interface up: %w", err)
 	}
 
