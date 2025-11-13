@@ -206,19 +206,22 @@ func (c *Client) ReleaseLease(ctx context.Context, currentIP, dhcpServerIP net.I
 	}
 	defer client.Close()
 
-	// Create RELEASE message
-	release, err := dhcpv4.NewReleaseFromACK(&dhcpv4.DHCPv4{
+	// Construct a minimal Lease object with ACK to use library's Release() method
+	// The library's Release() sends via WriteTo() which doesn't wait for response
+	ack := &dhcpv4.DHCPv4{
 		ClientIPAddr: currentIP,
 		ClientHWAddr: c.mac,
 		ServerIPAddr: dhcpServerIP,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create RELEASE message: %w", err)
+	}
+	ack.UpdateOption(dhcpv4.OptServerIdentifier(dhcpServerIP))
+
+	lease := &nclient4.Lease{
+		ACK: ack,
 	}
 
-	// Send RELEASE (no response expected)
-	serverAddr := &net.UDPAddr{IP: dhcpServerIP, Port: 67}
-	if _, err := client.SendAndRead(ctx, serverAddr, release, nil); err != nil {
+	// Send RELEASE (no response expected per RFC 2131)
+	// Library's Release() uses WriteTo() internally - no waiting
+	if err := client.Release(lease); err != nil {
 		return fmt.Errorf("failed to send RELEASE: %w", err)
 	}
 

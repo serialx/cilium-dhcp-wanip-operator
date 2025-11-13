@@ -14,7 +14,7 @@ import (
 
 func main() {
 	var (
-		listenAddr = flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
+		listenAddr = flag.String("listen", "127.0.0.1:8692", "HTTP listen address")
 		stateDir   = flag.String("state-dir", "/var/lib/dhcp-wan-agent", "State directory for lease persistence")
 		logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
 	)

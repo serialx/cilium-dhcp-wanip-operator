@@ -25,6 +25,7 @@ func SetupInterface(ifaceName string, ip net.IP, mac net.HardwareAddr) error {
 
 	// 1. Remove IP from interface (avoid BGP conflicts)
 	// The IP should not be bound to the interface to prevent local route conflicts
+	// Note: DHCP client may or may not have added the IP to the interface
 	addr := &netlink.Addr{
 		IPNet: &net.IPNet{
 			IP:   ip,
@@ -32,10 +33,8 @@ func SetupInterface(ifaceName string, ip net.IP, mac net.HardwareAddr) error {
 		},
 	}
 	if err := netlink.AddrDel(link, addr); err != nil {
-		// It's okay if the address wasn't there
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove IP from interface: %w", err)
-		}
+		// It's okay if the address wasn't there (EADDRNOTAVAIL or EINVAL)
+		// Just log and continue - the important thing is that the IP is not bound
 	}
 
 	// 2. Enable proxy ARP

@@ -117,7 +117,7 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
 			}
 
 			// Dial agent on router's localhost through SSH
-			remoteConn, err := sshClient.Dial("tcp", "127.0.0.1:8080")
+			remoteConn, err := sshClient.Dial("tcp", "127.0.0.1:8692")
 			if err != nil {
 				localConn.Close()
 				continue

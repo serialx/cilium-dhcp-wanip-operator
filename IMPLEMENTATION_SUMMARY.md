@@ -44,7 +44,7 @@ Successfully implemented the complete DHCP WAN Agent system as specified in [ROU
 - `GET /health` - Health check endpoint
 
 #### **Features**
-- Binds to `127.0.0.1:8080` only (not network accessible)
+- Binds to `127.0.0.1:8692` only (not network accessible)
 - JSON request/response format
 - Proper HTTP status codes (201, 409, 503, etc.)
 - Structured error responses
@@ -73,7 +73,7 @@ Successfully implemented the complete DHCP WAN Agent system as specified in [ROU
 ### 5. SSH Tunnel Client for Operator
 
 #### **Agent Client** ([internal/router/agent_client.go](internal/router/agent_client.go))
-- Creates SSH tunnel: `localhost:random → router:127.0.0.1:8080`
+- Creates SSH tunnel: `localhost:random → router:127.0.0.1:8692`
 - HTTP client uses local tunnel endpoint
 - Bidirectional connection forwarding
 - Proper timeout configuration (120s total)
@@ -131,7 +131,7 @@ make install-agent        # Install to router
 │ Router (UDM-Pro)                       │
 │  ┌──────────────────────────┐          │
 │  │ internal/agent/          │          │
-│  │ - HTTP API (127.0.0.1:8080)        │
+│  │ - HTTP API (127.0.0.1:8692)        │
 │  │ - DHCP via raw sockets   │          │
 │  │ - Auto renewal @ 50%     │          │
 │  │ - Reboot recovery        │          │
@@ -273,7 +273,7 @@ All goals from [ROUTER_AGENT_DESIGN.md](ROUTER_AGENT_DESIGN.md) achieved:
 - Tested on UDM-Pro (ARM64) but should work on any Linux router
 - Router client ([internal/router/](internal/router/)) is platform-independent
 - State file location: `/var/lib/dhcp-wan-agent/leases.json`
-- Default listen address: `127.0.0.1:8080`
+- Default listen address: `127.0.0.1:8692`
 
 ## 🤝 Integration Points
 

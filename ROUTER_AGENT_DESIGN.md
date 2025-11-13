@@ -30,14 +30,14 @@ Replace SSH-based shell scripts with a simple Go agent running on the router. Th
 │  │ - Updates Cilium pool    │          │
 │  └────────┬─────────────────┘          │
 │           │ SSH tunnel                 │
-│           │ (localhost:random → 127.0.0.1:8080)
+│           │ (localhost:random → 127.0.0.1:8692)
 └───────────┼────────────────────────────┘
             │ Encrypted SSH
 ┌───────────▼────────────────────────────┐
 │ Router (UDM-Pro)                       │
 │  ┌──────────────────────────┐          │
 │  │ dhcp-wan-agent           │          │
-│  │ - Binds to 127.0.0.1:8080│          │
+│  │ - Binds to 127.0.0.1:8692│          │
 │  │ - DHCP via raw sockets   │          │
 │  │ - Auto renewal @ 50%     │          │
 │  └────────┬─────────────────┘          │
@@ -58,7 +58,7 @@ Single Go binary running as systemd service on UDM-Pro.
 
 **What it does:**
 
-- HTTP API on **localhost:8080 only** (no network exposure)
+- HTTP API on **localhost:8692 only** (no network exposure)
 - Create/delete macvlan interfaces
 - DHCP via `github.com/insomniacslk/dhcp` (raw sockets!)
 - Auto-renewal every 50% of lease time with REBIND fallback
@@ -89,12 +89,12 @@ ip, err := agentClient.AllocateLease(ctx, wanIf, macAddr)
 
 ## Security Model
 
-**Agent**: Binds to `127.0.0.1:8080` only (unreachable from network)
+**Agent**: Binds to `127.0.0.1:8692` only (unreachable from network)
 
 **Operator**: Creates SSH tunnel for all API calls
 ```go
-// Tunnel: localhost:random → router:127.0.0.1:8080
-sshClient.Dial("tcp", "127.0.0.1:8080")
+// Tunnel: localhost:random → router:127.0.0.1:8692
+sshClient.Dial("tcp", "127.0.0.1:8692")
 ```
 
 **Why this is secure and elegant:**
@@ -531,7 +531,7 @@ func NewAgentClient(ctx context.Context, routerAddr string, sshConfig *ssh.Clien
             }
 
             // Dial agent on router's localhost through SSH
-            remoteConn, err := sshClient.Dial("tcp", "127.0.0.1:8080")
+            remoteConn, err := sshClient.Dial("tcp", "127.0.0.1:8692")
             if err != nil {
                 localConn.Close()
                 continue
