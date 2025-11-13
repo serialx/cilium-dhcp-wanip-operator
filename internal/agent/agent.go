@@ -23,6 +23,8 @@ type Agent struct {
 	shutdownCancel context.CancelFunc
 	httpServer     *http.Server
 	renewalWg      sync.WaitGroup
+	renewalCancels map[string]context.CancelFunc // interface -> cancel func
+	renewalMu      sync.Mutex
 	logger         *slog.Logger
 }
 
@@ -50,6 +52,7 @@ func New(cfg *Config) (*Agent, error) {
 		store:          store,
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
+		renewalCancels: make(map[string]context.CancelFunc),
 		logger:         cfg.Logger,
 	}
 
@@ -344,6 +347,9 @@ func (a *Agent) releaseLease(ctx context.Context, l *lease.Lease) error {
 		"interface", l.Interface,
 		"ip", l.IPAddress.String())
 
+	// Stop renewal goroutine first
+	a.stopRenewalLoop(l.Interface)
+
 	// Send DHCP RELEASE
 	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
 	releaseCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -434,11 +440,37 @@ func (a *Agent) verifyLeases(ctx context.Context) error {
 	return nil
 }
 
+// stopRenewalLoop stops the renewal goroutine for a lease
+func (a *Agent) stopRenewalLoop(iface string) {
+	a.renewalMu.Lock()
+	defer a.renewalMu.Unlock()
+
+	if cancel, exists := a.renewalCancels[iface]; exists {
+		a.logger.Info("cancelling renewal goroutine", "interface", iface)
+		cancel()
+		delete(a.renewalCancels, iface)
+	}
+}
+
 // startRenewalLoop starts background renewal for a lease
 func (a *Agent) startRenewalLoop(l *lease.Lease) {
+	// Create per-lease context for cancellation
+	renewalCtx, cancel := context.WithCancel(a.shutdownCtx)
+
+	// Store cancel function
+	a.renewalMu.Lock()
+	a.renewalCancels[l.Interface] = cancel
+	a.renewalMu.Unlock()
+
 	a.renewalWg.Add(1)
 	go func() {
 		defer a.renewalWg.Done()
+		defer func() {
+			// Clean up cancel function when goroutine exits
+			a.renewalMu.Lock()
+			delete(a.renewalCancels, l.Interface)
+			a.renewalMu.Unlock()
+		}()
 
 		// Use timer instead of ticker for dynamic intervals
 		nextRenewal := l.LeaseTime / 2
@@ -456,7 +488,7 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 			select {
 			case <-timer.C:
 				// Try unicast RENEW first
-				renewCtx, cancel := context.WithTimeout(a.shutdownCtx, 30*time.Second)
+				renewCtx, cancel := context.WithTimeout(renewalCtx, 30*time.Second)
 				err := a.renewLease(renewCtx, l)
 				cancel()
 
@@ -466,7 +498,7 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 						"error", err)
 
 					// Fallback to broadcast REBIND
-					rebindCtx, rebindCancel := context.WithTimeout(a.shutdownCtx, 30*time.Second)
+					rebindCtx, rebindCancel := context.WithTimeout(renewalCtx, 30*time.Second)
 					err := a.rebindLease(rebindCtx, l)
 					rebindCancel()
 
@@ -497,7 +529,7 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 					"interface", l.Interface,
 					"expiresAt", l.ExpiresAt)
 
-			case <-a.shutdownCtx.Done():
+			case <-renewalCtx.Done():
 				a.logger.Info("stopping renewal goroutine", "interface", l.Interface)
 				return
 			}
