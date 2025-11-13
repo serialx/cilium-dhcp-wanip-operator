@@ -42,7 +42,7 @@ func (c *Client) AcquireLease(ctx context.Context) (*LeaseInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DHCP client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Request lease with timeout
 	lease, err := client.Request(ctx)
@@ -89,7 +89,7 @@ func (c *Client) RenewLease(ctx context.Context, currentIP, dhcpServerIP net.IP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DHCP client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Create RENEW request
 	// CRITICAL: Use raw sockets to send with source IP without binding
@@ -147,7 +147,7 @@ func (c *Client) RebindLease(ctx context.Context, currentIP net.IP) (*LeaseInfo,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DHCP client: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Create REBIND request (broadcast)
 	req, err := dhcpv4.NewRequestFromOffer(&dhcpv4.DHCPv4{

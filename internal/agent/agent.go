@@ -172,7 +172,7 @@ func (a *Agent) handleAllocateLease(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleListLeases handles GET /leases
@@ -195,7 +195,7 @@ func (a *Agent) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleGetLease handles GET /leases/{interface}
@@ -217,7 +217,7 @@ func (a *Agent) handleGetLease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // handleReleaseLease handles DELETE /leases/{interface}
@@ -282,7 +282,7 @@ func (a *Agent) allocateLease(ctx context.Context, iface, wanParent string, mac 
 	var success bool
 	defer func() {
 		if !success {
-			network.DeleteMacvlan(iface)
+			_ = network.DeleteMacvlan(iface)
 		}
 	}()
 
@@ -399,7 +399,7 @@ func (a *Agent) verifyLeases(ctx context.Context) error {
 				"ip", l.IPAddress.String())
 			l.Status = lease.StatusStale
 			l.InterfaceExists = false
-			a.store.Set(l)
+			_ = a.store.Set(l)
 			continue
 		}
 
@@ -417,7 +417,7 @@ func (a *Agent) verifyLeases(ctx context.Context) error {
 				"ip", l.IPAddress.String(),
 				"error", err)
 			l.Status = lease.StatusStale
-			a.store.Set(l)
+			_ = a.store.Set(l)
 			continue
 		}
 
@@ -426,7 +426,7 @@ func (a *Agent) verifyLeases(ctx context.Context) error {
 		l.ExpiresAt = time.Now().Add(leaseInfo.LeaseTime)
 		l.LeaseTime = leaseInfo.LeaseTime
 		l.RenewalCount++
-		a.store.Set(l)
+		_ = a.store.Set(l)
 
 		a.logger.Info("lease verified and renewed successfully",
 			"interface", l.Interface,
@@ -510,7 +510,7 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 
 						// Mark as stale
 						l.Status = lease.StatusStale
-						a.store.Set(l)
+						_ = a.store.Set(l)
 
 						// Exponential backoff
 						timer.Reset(backoff)
