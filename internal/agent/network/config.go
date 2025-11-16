@@ -25,15 +25,22 @@ func SetupInterface(ifaceName string, ip net.IP, mac net.HardwareAddr) error {
 
 	// 1. Remove IP from interface (avoid BGP conflicts)
 	// The IP should not be bound to the interface to prevent local route conflicts
-	// Note: DHCP client may or may not have added the IP to the interface
-	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   ip,
-			Mask: net.CIDRMask(32, 32),
-		},
+	// DHCP client adds the IP to the interface, so we must remove it
+	// We need to find the actual address (with correct netmask) before deleting
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("failed to list addresses: %w", err)
 	}
-	// It's okay if the address wasn't there - best effort removal
-	_ = netlink.AddrDel(link, addr)
+
+	// Find and remove the matching IP address
+	for _, addr := range addrs {
+		if addr.IP.Equal(ip) {
+			if err := netlink.AddrDel(link, &addr); err != nil {
+				return fmt.Errorf("failed to remove IP from interface: %w", err)
+			}
+			break
+		}
+	}
 
 	// 2. Enable proxy ARP
 	proxyARPPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", ifaceName)
