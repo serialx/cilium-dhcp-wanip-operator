@@ -2,20 +2,22 @@
 
 ## Executive Summary
 
-Replace SSH-based shell scripts with a simple Go agent running on the router. The agent uses the `github.com/insomniacslk/dhcp` library to handle DHCP operations with raw sockets, enabling unicast renewals without ISP broadcast complaints.
+Replace SSH-based shell scripts with a simple Go agent running on the router. The agent uses the `github.com/insomniacslk/dhcp` library to handle DHCP operations with raw sockets, enabling proper DHCP renewal management without IP binding requirements.
 
 ## The Problem
 
-**Current approach**: Remove IP from interface → udhcpc can't bind() → falls back to broadcast renewals → ISP complains
+**Current approach**: Remove IP from interface → udhcpc can't bind() → falls back to broadcast renewals → unreliable behavior
 
-**Solution**: Use Go DHCP library with raw sockets → send unicast renewals without IP binding → ISP happy
+**Solution**: Use Go DHCP library with raw sockets → send broadcast renewals without IP binding → reliable, RFC-compliant renewals
 
 ## Goals
 
-1. ✅ **Unicast DHCP renewals** via raw sockets
-2. ✅ **No broadcast traffic** to ISP
+1. ✅ **Reliable DHCP renewals** via raw sockets (broadcast, RFC 2131 compliant)
+2. ✅ **No IP binding required** - renewals work even after IP removal from interface
 3. ✅ **Simple HTTP API** instead of SSH
 4. ✅ **Easy debugging** with structured logs
+
+**Note on Broadcast vs Unicast**: While the `github.com/insomniacslk/dhcp` library supports both renewal methods, unicast renewals don't work reliably in practice. We use broadcast renewals which are fully RFC 2131 compliant and work correctly with raw sockets even when the IP is not bound to the interface.
 
 ## Architecture Overview
 
@@ -200,7 +202,7 @@ Key insight: `github.com/insomniacslk/dhcp` uses **raw sockets (PF_PACKET)** whi
 type Lease struct {
     Interface       string        `json:"interface"`
     IPAddress       net.IP        `json:"ipAddress"`
-    DHCPServerIP    net.IP        `json:"dhcpServerIP"`    // CRITICAL: Required for unicast renewals!
+    DHCPServerIP    net.IP        `json:"dhcpServerIP"`    // Server identifier from DHCP ACK (required for REBIND)
     MACAddress      net.HardwareAddr `json:"macAddress"`
     ExpiresAt       time.Time     `json:"expiresAt"`
     LeaseTime       time.Duration `json:"leaseTime"`
@@ -225,18 +227,16 @@ dhcpServer := lease.ACK.ServerIdentifier()    // CRITICAL: Must persist this for
 lease := &Lease{
     Interface:     "wan-001",
     IPAddress:     ip,
-    DHCPServerIP:  dhcpServer,  // ← Must persist for unicast renewals!
+    DHCPServerIP:  dhcpServer,  // ← Must persist for REBIND fallback
     ExpiresAt:     time.Now().Add(leaseTime),
     LeaseTime:     leaseTime,
 }
 
-// Renew lease (unicast, no IP binding needed!)
-req, _ := dhcpv4.NewRequestFromOffer(&dhcpv4.DHCPv4{
-    ClientIPAddr: ip,  // Our current IP (not bound to interface!)
-    ClientHWAddr: mac,
-})
-resp, _ := client.SendAndRead(ctx, dhcpServer, req, nil)
-// Works even though IP was removed from interface!
+// Renew lease using library's Renew() method (broadcast, no IP binding needed!)
+// The library handles the RENEW packet construction and sends it via raw sockets
+renewedLease, _ := client.Renew(ctx, &nclient4.Lease{Offer: offer, ACK: ack})
+// Works even though IP was removed from interface (raw sockets don't require bind!)
+// Sends broadcast RENEW (0.0.0.0 → 255.255.255.255) which is RFC 2131 compliant
 
 // Background renewal with proper error handling
 // Note: Use agent's shutdown context, not request context!
@@ -1037,13 +1037,14 @@ func TestOperatorWithAgent(t *testing.T) {
 
 **Comparison to current approach:**
 
-| Feature | SSH Script | Go Agent |
+| Feature | SSH Script (udhcpc) | Go Agent |
 |---------|------------|----------|
-| DHCP Renewals | ❌ Broadcast → ISP complains | ✅ Unicast via raw sockets |
+| DHCP Renewals | ⚠️ Unreliable broadcast (can't bind without IP) | ✅ Reliable broadcast via raw sockets (no bind needed) |
+| IP Binding | ❌ Required for udhcpc → causes conflicts with BGP | ✅ Not required → clean separation from BGP routing |
 | Security | ⚠️ SSH keys | ✅ SSH tunnel (same keys, localhost agent) |
 | Code Quality | ⚠️ Shell script | ✅ Testable Go with unit tests |
 | Debugging | ⚠️ Parse stderr | ✅ Structured logs + API inspection |
-| Error Handling | ⚠️ Exit codes | ✅ Proper errors + retry/fallback |
+| Error Handling | ⚠️ Exit codes | ✅ Proper errors + retry/fallback (RENEW→REBIND) |
 | Recovery | ❌ Manual | ✅ Auto-restart + operator reconciliation |
 | Dependencies | ⚠️ `arping`, `ip`, `sysctl` | ✅ Pure Go (raw sockets for everything) |
 

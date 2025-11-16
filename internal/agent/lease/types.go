@@ -45,6 +45,7 @@ type Store struct {
 	mu         sync.RWMutex
 	leases     map[string]*Lease // interface name -> lease
 	stateFile  string
+	saveMu     sync.Mutex // Serializes save operations to prevent TOCTOU race
 	inflightMu sync.Mutex
 	inflight   map[string]chan struct{} // Per-interface operation locks
 }
@@ -134,6 +135,11 @@ func (s *Store) ReleaseInflight(iface string) {
 
 // save atomically writes leases to disk
 func (s *Store) save() error {
+	// Serialize all save operations to prevent TOCTOU race with shared .tmp file
+	// Race scenario: Two goroutines write to same .tmp, one renames it, other fails
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	data, err := json.MarshalIndent(s.leases, "", "  ")
 	s.mu.RUnlock()

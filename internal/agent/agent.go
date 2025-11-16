@@ -288,7 +288,7 @@ func (a *Agent) allocateLease(ctx context.Context, iface, wanParent string, mac 
 
 	// 2. Acquire DHCP lease
 	a.logger.Info("acquiring DHCP lease", "interface", iface)
-	dhcpClient := dhcp.NewClient(iface, mac)
+	dhcpClient := dhcp.NewClient(iface, mac, a.logger)
 
 	dhcpCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -361,7 +361,7 @@ func (a *Agent) releaseLease(ctx context.Context, l *lease.Lease) error {
 	a.stopRenewalLoop(l.Interface)
 
 	// Send DHCP RELEASE
-	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
+	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress, a.logger)
 	releaseCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -416,7 +416,7 @@ func (a *Agent) verifyLeases(ctx context.Context) {
 		l.InterfaceExists = true
 
 		// Try to renew lease to verify it's still valid
-		dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
+		dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress, a.logger)
 		renewCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		leaseInfo, err := dhcpClient.RenewLease(renewCtx, l.IPAddress, l.DHCPServerIP, l.DHCPOffer, l.DHCPAck)
 		cancel()
@@ -556,7 +556,7 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 
 // renewLease performs unicast RENEW
 func (a *Agent) renewLease(ctx context.Context, l *lease.Lease) error {
-	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
+	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress, a.logger)
 	leaseInfo, err := dhcpClient.RenewLease(ctx, l.IPAddress, l.DHCPServerIP, l.DHCPOffer, l.DHCPAck)
 	if err != nil {
 		return err
@@ -581,7 +581,7 @@ func (a *Agent) renewLease(ctx context.Context, l *lease.Lease) error {
 
 // rebindLease performs broadcast REBIND
 func (a *Agent) rebindLease(ctx context.Context, l *lease.Lease) error {
-	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
+	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress, a.logger)
 	leaseInfo, err := dhcpClient.RebindLease(ctx, l.IPAddress)
 	if err != nil {
 		return err

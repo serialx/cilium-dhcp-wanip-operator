@@ -5,6 +5,7 @@ package dhcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -26,15 +27,17 @@ type LeaseInfo struct {
 
 // Client wraps DHCP operations
 type Client struct {
-	iface string
-	mac   net.HardwareAddr
+	iface  string
+	mac    net.HardwareAddr
+	logger *slog.Logger
 }
 
 // NewClient creates a new DHCP client for an interface
-func NewClient(iface string, mac net.HardwareAddr) *Client {
+func NewClient(iface string, mac net.HardwareAddr, logger *slog.Logger) *Client {
 	return &Client{
-		iface: iface,
-		mac:   mac,
+		iface:  iface,
+		mac:    mac,
+		logger: logger,
 	}
 }
 
@@ -105,11 +108,10 @@ func (c *Client) RenewLease(ctx context.Context, currentIP, dhcpServerIP net.IP,
 
 	var renewedLease *nclient4.Lease
 
-	// DEBUG: Log what we received
-	fmt.Printf("DEBUG RenewLease: previousOffer len=%d, previousAck len=%d\n", len(previousOffer), len(previousAck))
+	c.logger.Debug("renewing lease", "previousOfferLen", len(previousOffer), "previousAckLen", len(previousAck))
 
 	if len(previousOffer) > 0 && len(previousAck) > 0 {
-		fmt.Printf("DEBUG: Using library's Renew() method (broadcast)\n")
+		c.logger.Debug("using library's Renew() method", "mode", "broadcast")
 		// Use default raw socket client - sends broadcast renewals (0.0.0.0 > 255.255.255.255)
 		// Unicast renewals don't work reliably with this library, but broadcast works fine
 		// and is valid per RFC 2131
@@ -135,7 +137,7 @@ func (c *Client) RenewLease(ctx context.Context, currentIP, dhcpServerIP net.IP,
 			return nil, fmt.Errorf("RENEW request failed: %w", err)
 		}
 	} else {
-		fmt.Printf("DEBUG: Using fallback manual renewal (broadcast)\n")
+		c.logger.Debug("using fallback manual renewal", "mode", "broadcast")
 		// Fallback: Manual renewal (for old leases without saved ACK)
 		req, err := dhcpv4.NewRequestFromOffer(&dhcpv4.DHCPv4{
 			ClientIPAddr: currentIP,
