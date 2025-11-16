@@ -23,28 +23,6 @@ func SetupInterface(ifaceName string, ip net.IP, subnetMask net.IPMask) error {
 		return fmt.Errorf("failed to get interface: %w", err)
 	}
 
-	// 1. Add IP address to interface
-	// The IP MUST be on the interface for DHCP renewal to work:
-	// - Send RENEW requests with the correct source IP (raw sockets use interface IP)
-	// - Receive responses (kernel routing needs the IP for proper packet delivery)
-	//
-	// This does NOT cause BGP conflicts because:
-	// - Proxy ARP handles ARP requests for this IP
-	// - BGP advertises the route, packets arrive via router's LAN interface
-	// - The local route on this interface has lower preference than BGP routes
-	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   ip,
-			Mask: subnetMask,
-		},
-	}
-	if err := netlink.AddrAdd(link, addr); err != nil {
-		// Ignore if address already exists
-		if !os.IsExist(err) {
-			return fmt.Errorf("failed to add IP address: %w", err)
-		}
-	}
-
 	// 2. Enable proxy ARP
 	proxyARPPath := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/proxy_arp", ifaceName)
 	if err := os.WriteFile(proxyARPPath, []byte("1"), 0644); err != nil {
