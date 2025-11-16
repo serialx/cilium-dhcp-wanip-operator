@@ -50,18 +50,12 @@ This command:
 - Updates `config/manager/kustomization.yaml` with the new image tag
 - Generates `dist/install.yaml` with all CRDs and deployment manifests
 
-**Note**: The generated file goes to `dist/install.yaml`, but it should be copied to `config/install.yaml` for version control:
-
-```bash
-cp dist/install.yaml config/install.yaml
-```
-
 ### 3. Commit Version Bump
 
 Commit the version changes **before** creating the tag:
 
 ```bash
-git add config/install.yaml config/manager/kustomization.yaml
+git add dist/install.yaml config/manager/kustomization.yaml
 git commit -m "chore: update installer manifest for ${VERSION}"
 ```
 
@@ -128,7 +122,7 @@ gh release create ${VERSION} \
 
 **Operator:**
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/config/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/dist/install.yaml
 ```
 
 **Router Agent:**
@@ -166,12 +160,12 @@ Verify the release is complete:
 - [ ] GitHub release created: https://github.com/serialx/cilium-dhcp-wanip-operator/releases
 - [ ] Docker image available: `docker pull ghcr.io/serialx/cilium-dhcp-wanip-operator:${VERSION}`
 - [ ] Agent binaries attached to release
-- [ ] Install manifest accessible at: `https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/config/install.yaml`
+- [ ] Install manifest accessible at: `https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/dist/install.yaml`
 
 Test installation:
 ```bash
 # In a test cluster
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/config/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/dist/install.yaml
 kubectl -n cilium-dhcp-wanip-operator-system get pods
 ```
 
@@ -213,8 +207,7 @@ If you forgot to update the installer before tagging:
 # Move the tag (see above)
 # Update installer
 make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:${VERSION}
-cp dist/install.yaml config/install.yaml
-git add config/install.yaml config/manager/kustomization.yaml
+git add dist/install.yaml config/manager/kustomization.yaml
 git commit --amend -m "chore: update installer manifest for ${VERSION}"
 # Recreate tag
 git tag -a ${VERSION} -m "Release ${VERSION} - Description"
@@ -234,10 +227,9 @@ export VERSION=v0.3.4
 
 # 3. Generate installer
 make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:${VERSION}
-cp dist/install.yaml config/install.yaml
 
 # 4. Commit
-git add config/install.yaml config/manager/kustomization.yaml
+git add dist/install.yaml config/manager/kustomization.yaml
 git commit -m "chore: update installer manifest for ${VERSION}"
 
 # 5. Tag and push
@@ -258,7 +250,7 @@ gh release create ${VERSION} \
 
 # 8. Verify
 docker pull ghcr.io/serialx/cilium-dhcp-wanip-operator:${VERSION}
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/config/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/${VERSION}/dist/install.yaml
 ```
 
 ## Version History

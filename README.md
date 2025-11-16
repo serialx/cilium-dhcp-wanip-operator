@@ -61,7 +61,7 @@ Perfect for homelabs where you have limited public IPs but want proper LoadBalan
 **1. Deploy the operator:**
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/dist/install.yaml
 ```
 
 This will:
@@ -297,7 +297,9 @@ make manifests generate
 
 ### Releasing New Versions
 
-When you're ready to release a new version:
+📚 **See [RELEASE.md](RELEASE.md) for the complete release process documentation.**
+
+Quick overview for releasing a new version:
 
 **1. Build and push the Docker image**
 
@@ -328,12 +330,12 @@ After the CI completes, update the installer manifest with the new image:
 make build-installer IMG=ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.2
 ```
 
-This updates `config/install.yaml` with the new image tag.
+This updates `dist/install.yaml` with the new image tag.
 
 **4. Commit and push the installer**
 
 ```bash
-git add config/install.yaml config/manager/kustomization.yaml
+git add dist/install.yaml config/manager/kustomization.yaml
 git commit -m "chore: update installer manifest for v0.3.2"
 git push origin main
 ```
@@ -353,7 +355,7 @@ Or create it manually in the GitHub UI and attach the agent binaries.
 **Users can then install the new version:**
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/dist/install.yaml
 ```
 
 ## Uninstall
@@ -365,7 +367,7 @@ kubectl apply -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-ope
 kubectl delete publicipclaims --all
 
 # Remove the operator
-kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/config/install.yaml
+kubectl delete -f https://raw.githubusercontent.com/serialx/cilium-dhcp-wanip-operator/v0.3.2/dist/install.yaml
 
 # Stop and remove the router agent
 ssh root@192.168.1.1 "systemctl disable --now dhcp-wan-agent"
