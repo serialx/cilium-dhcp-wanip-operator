@@ -309,11 +309,19 @@ func (a *Agent) allocateLease(ctx context.Context, iface, wanParent string, mac 
 
 	// 4. Configure network settings
 	a.logger.Info("configuring network settings", "interface", iface)
-	if err := network.SetupInterface(iface, leaseInfo.IPAddress, mac); err != nil {
+	if err := network.SetupInterface(iface, leaseInfo.IPAddress, leaseInfo.SubnetMask); err != nil {
 		return nil, fmt.Errorf("network setup failed: %w", err)
 	}
 
 	// 5. Create and store lease
+	var offerBytes, ackBytes []byte
+	if leaseInfo.Offer != nil {
+		offerBytes = leaseInfo.Offer.ToBytes()
+	}
+	if leaseInfo.ACK != nil {
+		ackBytes = leaseInfo.ACK.ToBytes()
+	}
+
 	l := &lease.Lease{
 		Interface:       iface,
 		WanParent:       wanParent,
@@ -326,6 +334,8 @@ func (a *Agent) allocateLease(ctx context.Context, iface, wanParent string, mac 
 		Status:          lease.StatusActive,
 		InterfaceExists: true,
 		CreatedAt:       time.Now(),
+		DHCPOffer:       offerBytes,
+		DHCPAck:         ackBytes,
 	}
 
 	if err := a.store.Set(l); err != nil {
@@ -406,7 +416,7 @@ func (a *Agent) verifyLeases(ctx context.Context) {
 		// Try to renew lease to verify it's still valid
 		dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
 		renewCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		leaseInfo, err := dhcpClient.RenewLease(renewCtx, l.IPAddress, l.DHCPServerIP)
+		leaseInfo, err := dhcpClient.RenewLease(renewCtx, l.IPAddress, l.DHCPServerIP, l.DHCPOffer, l.DHCPAck)
 		cancel()
 
 		if err != nil {
@@ -424,6 +434,15 @@ func (a *Agent) verifyLeases(ctx context.Context) {
 		l.ExpiresAt = time.Now().Add(leaseInfo.LeaseTime)
 		l.LeaseTime = leaseInfo.LeaseTime
 		l.RenewalCount++
+
+		// Update saved Offer and ACK for next renewal
+		if leaseInfo.Offer != nil {
+			l.DHCPOffer = leaseInfo.Offer.ToBytes()
+		}
+		if leaseInfo.ACK != nil {
+			l.DHCPAck = leaseInfo.ACK.ToBytes()
+		}
+
 		_ = a.store.Set(l)
 
 		a.logger.Info("lease verified and renewed successfully",
@@ -536,16 +555,24 @@ func (a *Agent) startRenewalLoop(l *lease.Lease) {
 // renewLease performs unicast RENEW
 func (a *Agent) renewLease(ctx context.Context, l *lease.Lease) error {
 	dhcpClient := dhcp.NewClient(l.Interface, l.MACAddress)
-	leaseInfo, err := dhcpClient.RenewLease(ctx, l.IPAddress, l.DHCPServerIP)
+	leaseInfo, err := dhcpClient.RenewLease(ctx, l.IPAddress, l.DHCPServerIP, l.DHCPOffer, l.DHCPAck)
 	if err != nil {
 		return err
 	}
 
-	// Update lease
+	// Update lease with renewed information
 	l.ExpiresAt = time.Now().Add(leaseInfo.LeaseTime)
 	l.LeaseTime = leaseInfo.LeaseTime
 	l.RenewalCount++
 	l.Status = lease.StatusActive
+
+	// Update saved Offer and ACK for next renewal
+	if leaseInfo.Offer != nil {
+		l.DHCPOffer = leaseInfo.Offer.ToBytes()
+	}
+	if leaseInfo.ACK != nil {
+		l.DHCPAck = leaseInfo.ACK.ToBytes()
+	}
 
 	return a.store.Set(l)
 }
@@ -564,6 +591,14 @@ func (a *Agent) rebindLease(ctx context.Context, l *lease.Lease) error {
 	l.DHCPServerIP = leaseInfo.DHCPServerIP // May have changed
 	l.RenewalCount++
 	l.Status = lease.StatusActive
+
+	// Update saved Offer and ACK for next renewal
+	if leaseInfo.Offer != nil {
+		l.DHCPOffer = leaseInfo.Offer.ToBytes()
+	}
+	if leaseInfo.ACK != nil {
+		l.DHCPAck = leaseInfo.ACK.ToBytes()
+	}
 
 	return a.store.Set(l)
 }

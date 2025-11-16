@@ -34,6 +34,8 @@ type Lease struct {
 	Status          string           `json:"status"`          // "active", "stale", "expired"
 	InterfaceExists bool             `json:"interfaceExists"` // true if kernel interface exists
 	CreatedAt       time.Time        `json:"createdAt"`
+	DHCPOffer       []byte           `json:"dhcpOffer,omitempty"` // Raw DHCP OFFER packet
+	DHCPAck         []byte           `json:"dhcpAck,omitempty"`   // Raw DHCP ACK packet
 }
 
 // Store manages lease persistence and in-memory state

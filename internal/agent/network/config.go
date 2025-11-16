@@ -13,32 +13,35 @@ import (
 
 // SetupInterface configures network settings for a WAN interface
 // This includes:
-// - Removing IP from interface (avoid BGP conflicts)
+// - Adding IP address to the interface (required for DHCP renewal)
 // - Enabling proxy ARP
 // - Adding neighbor proxy
 // - Disabling rp_filter (allow asymmetric routing)
-func SetupInterface(ifaceName string, ip net.IP, mac net.HardwareAddr) error {
+func SetupInterface(ifaceName string, ip net.IP, subnetMask net.IPMask) error {
 	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get interface: %w", err)
 	}
 
-	// 1. Remove IP from interface (avoid BGP conflicts)
-	// The IP should not be bound to the interface to prevent local route conflicts
-	// DHCP client adds the IP to the interface, so we must remove it
-	// We need to find the actual address (with correct netmask) before deleting
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-	if err != nil {
-		return fmt.Errorf("failed to list addresses: %w", err)
+	// 1. Add IP address to interface
+	// The IP MUST be on the interface for DHCP renewal to work:
+	// - Send RENEW requests with the correct source IP (raw sockets use interface IP)
+	// - Receive responses (kernel routing needs the IP for proper packet delivery)
+	//
+	// This does NOT cause BGP conflicts because:
+	// - Proxy ARP handles ARP requests for this IP
+	// - BGP advertises the route, packets arrive via router's LAN interface
+	// - The local route on this interface has lower preference than BGP routes
+	addr := &netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   ip,
+			Mask: subnetMask,
+		},
 	}
-
-	// Find and remove the matching IP address
-	for _, addr := range addrs {
-		if addr.IP.Equal(ip) {
-			if err := netlink.AddrDel(link, &addr); err != nil {
-				return fmt.Errorf("failed to remove IP from interface: %w", err)
-			}
-			break
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		// Ignore if address already exists
+		if !os.IsExist(err) {
+			return fmt.Errorf("failed to add IP address: %w", err)
 		}
 	}
 

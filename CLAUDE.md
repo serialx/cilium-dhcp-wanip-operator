@@ -50,15 +50,30 @@ make docker-buildx IMG=<registry>/cilium-dhcp-wanip-operator:tag
 **Router Agent (v0.3.2+):**
 ```bash
 # Build agent for Linux ARM64 (UDM-Pro)
-GOOS=linux GOARCH=arm64 go build -o dhcp-wan-agent cmd/agent/main.go
+make build-agent
 
 # Build agent for Linux AMD64
-GOOS=linux GOARCH=amd64 go build -o dhcp-wan-agent cmd/agent/main.go
+GOOS=linux GOARCH=amd64 go build -o bin/dhcp-wan-agent cmd/agent/main.go
 
-# Deploy to router
-scp dhcp-wan-agent root@router:/data/dhcp-wan-agent/bin/
-scp deploy/agent/dhcp-wan-agent.service root@router:/etc/systemd/system/
-ssh root@router systemctl enable --now dhcp-wan-agent
+# Initial deployment to router
+scp bin/dhcp-wan-agent root@udm-pro:/data/dhcp-wan-agent/bin/
+scp deploy/agent/dhcp-wan-agent.service root@udm-pro:/etc/systemd/system/
+ssh root@udm-pro systemctl enable --now dhcp-wan-agent
+
+# Quick rebuild and deploy (during development)
+make build-agent && \
+  ssh root@udm-pro /data/dhcp-wan-agent/manage.sh stop && \
+  scp bin/dhcp-wan-agent root@udm-pro:/data/dhcp-wan-agent/bin/dhcp-wan-agent && \
+  ssh root@udm-pro /data/dhcp-wan-agent/manage.sh start
+
+# Check agent status
+ssh root@udm-pro "systemctl status dhcp-wan-agent | head -20"
+
+# View recent agent logs
+ssh root@udm-pro journalctl -u dhcp-wan-agent --no-pager -n 30
+
+# Follow agent logs in real-time
+ssh root@udm-pro journalctl -u dhcp-wan-agent -f
 ```
 
 ### Code Generation
