@@ -546,7 +546,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.3
+        image: ghcr.io/serialx/cilium-dhcp-wanip-operator:v0.3.4
         livenessProbe:
           httpGet:
             path: /healthz
